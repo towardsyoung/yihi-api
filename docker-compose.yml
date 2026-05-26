@@ -16,7 +16,10 @@ version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
-    image: calciumion/new-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yihi-api:local
     container_name: new-api
     restart: always
     command: --log-dir /app/logs
@@ -57,6 +60,8 @@ services:
     container_name: redis
     restart: always
     command: ["redis-server", "--requirepass", "123456"]  # ⚠️ IMPORTANT: Change this password in production!
+    ports:
+      - "6379:6379"
     networks:
       - new-api-network
 
@@ -72,8 +77,8 @@ services:
       - pg_data:/var/lib/postgresql/data
     networks:
       - new-api-network
-#    ports:
-#      - "5432:5432"  # Uncomment if you need to access PostgreSQL from outside Docker
+    ports:
+      - "5432:5432"  # Expose PostgreSQL for local backend development
 
 #  mysql:
 #    image: mysql:8.2
