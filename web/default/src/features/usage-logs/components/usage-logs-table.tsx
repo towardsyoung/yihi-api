@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
@@ -17,44 +35,29 @@ import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useIsAdmin } from '@/hooks/use-admin'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { TableCell, TableRow } from '@/components/ui/table'
+import { DataTablePage } from '@/components/data-table'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import {
-  DataTablePagination,
-  DataTableToolbar,
-  DataTableViewOptions,
-  TableSkeleton,
-  TableEmpty,
-  MobileCardList,
-} from '@/components/data-table'
-import { PageFooterPortal } from '@/components/layout'
-import { DEFAULT_LOGS_DATA, LOG_TYPE_ENUM } from '../constants'
+  DEFAULT_LOGS_DATA,
+  LOG_TYPE_ALL_VALUE,
+  LOG_TYPE_ENUM,
+} from '../constants'
 import { useColumnsByCategory } from '../lib/columns'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
-import { CommonLogsStats } from './common-logs-stats'
+import { TaskLogsFilterBar } from './task-logs-filter-bar'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
-
-const logTypeBorderColor: Record<number, string> = {
-  [LOG_TYPE_ENUM.TOPUP]: 'border-l-cyan-400 dark:border-l-cyan-500',
-  [LOG_TYPE_ENUM.CONSUME]: 'border-l-emerald-400 dark:border-l-emerald-500',
-  [LOG_TYPE_ENUM.MANAGE]: 'border-l-orange-400 dark:border-l-orange-500',
-  [LOG_TYPE_ENUM.SYSTEM]: 'border-l-purple-400 dark:border-l-purple-500',
-  [LOG_TYPE_ENUM.ERROR]: 'border-l-rose-400 dark:border-l-rose-500',
-  [LOG_TYPE_ENUM.REFUND]: 'border-l-blue-400 dark:border-l-blue-500',
-}
 
 const logTypeRowTint: Record<number, string> = {
   [LOG_TYPE_ENUM.ERROR]: 'bg-rose-50/40 dark:bg-rose-950/20',
   [LOG_TYPE_ENUM.REFUND]: 'bg-blue-50/30 dark:bg-blue-950/15',
+}
+
+function deserializeLogTypeFilter(value: unknown): unknown[] {
+  const values = Array.isArray(value) ? value : value ? [value] : []
+  return values.filter((item) => String(item) !== LOG_TYPE_ALL_VALUE)
 }
 
 interface UsageLogsTableProps {
@@ -76,10 +79,15 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   } = useTableUrlState({
     search: route.useSearch(),
     navigate: route.useNavigate(),
-    pagination: { defaultPage: 1, defaultPageSize: 20 },
+    pagination: { defaultPage: 1, defaultPageSize: isMobile ? 20 : 100 },
     globalFilter: { enabled: false },
     columnFilters: [
-      { columnId: 'created_at', searchKey: 'type', type: 'array' as const },
+      {
+        columnId: 'created_at',
+        searchKey: 'type',
+        type: 'array' as const,
+        deserialize: deserializeLogTypeFilter,
+      },
       { columnId: 'model_name', searchKey: 'model', type: 'string' as const },
       { columnId: 'token_name', searchKey: 'token', type: 'string' as const },
       { columnId: 'group', searchKey: 'group', type: 'string' as const },
@@ -166,112 +174,46 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
 
   const isCommon = logCategory === 'common'
 
-  const renderRows = () => {
-    const rows = table.getRowModel().rows
-    if (rows.length === 0) return null
-
-    return rows.map((row) => {
-      const logType = (row.original as Record<string, unknown>).type as
-        | number
-        | undefined
-      const borderClass =
-        isCommon && logType != null
-          ? logTypeBorderColor[logType] ?? 'border-l-transparent'
-          : ''
-      const tintClass =
-        isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
-
-      return (
-        <TableRow
-          key={row.id}
-          className={cn(
-            '!border-l-[3px] transition-colors',
-            borderClass,
-            tintClass
-          )}
-        >
-          {row.getVisibleCells().map((cell) => (
-            <TableCell key={cell.id} className='py-2'>
-              {flexRender(cell.column.columnDef.cell, cell.getContext())}
-            </TableCell>
-          ))}
-        </TableRow>
-      )
-    })
-  }
-
   return (
-    <>
-      <div className='space-y-4'>
-        {logCategory === 'common' ? (
-          <div className='rounded-md border bg-card/50 p-3 shadow-xs'>
-            <CommonLogsFilterBar
-              stats={<CommonLogsStats />}
-              viewOptions={<DataTableViewOptions table={table} />}
-            />
-          </div>
+    <DataTablePage
+      table={table}
+      columns={columns as ColumnDef<Record<string, unknown>>[]}
+      isLoading={isLoadingData}
+      isFetching={isFetching}
+      emptyTitle={t('No Logs Found')}
+      emptyDescription={t(
+        'No usage logs available. Logs will appear here once API calls are made.'
+      )}
+      skeletonKeyPrefix='usage-log-skeleton'
+      tableClassName={cn(
+        'overflow-x-auto',
+        '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
+      )}
+      tableHeaderClassName='bg-muted/30 sticky top-0 z-10'
+      toolbar={
+        isCommon ? (
+          <CommonLogsFilterBar table={table} />
         ) : (
-          <DataTableToolbar
-            table={table}
-            filters={[]}
-            customSearch={null}
-          />
-        )}
-        {isMobile ? (
-          <MobileCardList
-            table={table}
-            isLoading={isLoadingData}
-            emptyTitle={t('No Logs Found')}
-            emptyDescription={t(
-              'No usage logs available. Logs will appear here once API calls are made.'
-            )}
-          />
-        ) : (
-          <div
-            className={cn(
-              'overflow-hidden rounded-md border transition-opacity duration-150',
-              isFetching && !isLoadingData && 'pointer-events-none opacity-50'
-            )}
-          >
-            <Table>
-              <TableHeader className='bg-muted/30 sticky top-0 z-10'>
-                {table.getHeaderGroups().map((headerGroup) => (
-                  <TableRow key={headerGroup.id} className='border-l-[3px] border-l-transparent'>
-                    {headerGroup.headers.map((header) => (
-                      <TableHead key={header.id} colSpan={header.colSpan}>
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(
-                              header.column.columnDef.header,
-                              header.getContext()
-                            )}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                ))}
-              </TableHeader>
-              <TableBody>
-                {isLoadingData ? (
-                  <TableSkeleton table={table} keyPrefix='usage-log-skeleton' />
-                ) : table.getRowModel().rows.length === 0 ? (
-                  <TableEmpty
-                    colSpan={columns.length}
-                    title={t('No Logs Found')}
-                    description={t(
-                      'No usage logs available. Logs will appear here once API calls are made.'
-                    )}
-                  />
-                ) : (
-                  renderRows()
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </div>
-      <PageFooterPortal>
-        <DataTablePagination table={table} />
-      </PageFooterPortal>
-    </>
+          <TaskLogsFilterBar table={table} logCategory={logCategory} />
+        )
+      }
+      renderRow={(row) => {
+        const logType = (row.original as Record<string, unknown>).type as
+          | number
+          | undefined
+        const tintClass =
+          isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
+
+        return (
+          <TableRow key={row.id} className={cn('transition-colors', tintClass)}>
+            {row.getVisibleCells().map((cell) => (
+              <TableCell key={cell.id} className={isCommon ? 'py-2' : 'py-3.5'}>
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </TableCell>
+            ))}
+          </TableRow>
+        )
+      }}
+    />
   )
 }

@@ -1,40 +1,51 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import {
-  LayoutDashboard,
-  Key,
-  FileText,
-  Wallet,
+  Activity,
   Box,
-  Users,
+  CreditCard,
+  FileText,
+  FlaskConical,
+  Key,
+  LayoutDashboard,
+  ListTodo,
+  MessageSquare,
+  Radio,
+  Settings,
   Ticket,
   User,
-  Command,
-  Radio,
-  FlaskConical,
-  MessageSquare,
-  CreditCard,
+  Users,
+  Wallet,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useAuthStore } from '@/stores/auth-store'
-import { WORKSPACE_IDS } from '@/components/layout/lib/workspace-registry'
 import { type SidebarData } from '@/components/layout/types'
-import { getDashboardSectionNavItems } from '@/features/dashboard/section-registry'
-import { getModelsSectionNavItems } from '@/features/models/section-registry'
-import { getUsageLogsSectionNavItems } from '@/features/usage-logs/section-registry'
 
+/**
+ * Root navigation groups for the application sidebar.
+ *
+ * These are shown when the URL does not match any nested sidebar view
+ * registered in `layout/lib/sidebar-view-registry.ts`.
+ */
 export function useSidebarData(): SidebarData {
   const { t } = useTranslation()
-  const user = useAuthStore((s) => s.auth.user)
-  const isAdmin = Boolean(user?.role && user.role >= 10)
 
   return {
-    workspaces: [
-      {
-        id: WORKSPACE_IDS.DEFAULT,
-        name: '', // Dynamically fetches system name
-        logo: Command,
-        plan: '', // Dynamically fetches system version
-      },
-    ],
     navGroups: [
       {
         id: 'chat',
@@ -57,9 +68,14 @@ export function useSidebarData(): SidebarData {
         title: t('General'),
         items: [
           {
+            title: t('Overview'),
+            url: '/dashboard/overview',
+            icon: Activity,
+          },
+          {
             title: t('Dashboard'),
+            url: '/dashboard/models',
             icon: LayoutDashboard,
-            items: getDashboardSectionNavItems(t, { isAdmin }),
           },
           {
             title: t('API Keys'),
@@ -68,9 +84,22 @@ export function useSidebarData(): SidebarData {
           },
           {
             title: t('Usage Logs'),
+            url: '/usage-logs/common',
             icon: FileText,
-            items: getUsageLogsSectionNavItems(t),
           },
+          {
+            title: t('Task Logs'),
+            url: '/usage-logs/task',
+            activeUrls: ['/usage-logs/drawing'],
+            configUrls: ['/usage-logs/drawing', '/usage-logs/task'],
+            icon: ListTodo,
+          },
+        ],
+      },
+      {
+        id: 'personal',
+        title: t('Personal'),
+        items: [
           {
             title: t('Wallet'),
             url: '/wallet',
@@ -94,8 +123,8 @@ export function useSidebarData(): SidebarData {
           },
           {
             title: t('Models'),
+            url: '/models/metadata',
             icon: Box,
-            items: getModelsSectionNavItems(t),
           },
           {
             title: t('Users'),
@@ -111,6 +140,12 @@ export function useSidebarData(): SidebarData {
             title: t('Subscription Management'),
             url: '/subscriptions',
             icon: CreditCard,
+          },
+          {
+            title: t('System Settings'),
+            url: '/system-settings/site',
+            activeUrls: ['/system-settings'],
+            icon: Settings,
           },
         ],
       },

@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 /**
  * Type definitions for usage logs
  */
@@ -34,6 +52,7 @@ export interface CommonLogFilters extends CommonFilters {
   group?: string
   username?: string
   requestId?: string
+  upstreamRequestId?: string
 }
 
 /**
@@ -216,6 +235,7 @@ export interface MidjourneyLog {
 export interface TaskLog {
   id: number
   user_id: number
+  username?: string
   platform: string // suno, kling, runway, etc.
   task_id: string
   action: string // MUSIC, LYRICS, GENERATE, TEXT_GENERATE, etc.
@@ -248,6 +268,7 @@ export interface GetLogsParams {
   channel?: number
   group?: string
   request_id?: string
+  upstream_request_id?: string
 }
 
 export interface GetLogsResponse {
@@ -271,6 +292,7 @@ export interface GetLogStatsParams {
   channel?: number
   group?: string
   request_id?: string
+  upstream_request_id?: string
 }
 
 export interface GetLogStatsResponse {
