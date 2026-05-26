@@ -1,5 +1,7 @@
 package doubao
 
+import "strings"
+
 var ModelList = []string{
 	"doubao-seedance-1-0-pro-250528",
 	"doubao-seedance-1-0-lite-t2v",
@@ -11,15 +13,37 @@ var ModelList = []string{
 
 var ChannelName = "doubao-video"
 
-// videoInputRatioMap 视频输入折扣比率（含视频单价 / 不含视频单价）。
-// 管理员应将 ModelRatio 设置为"不含视频"的较高费率，
-// 系统在检测到视频输入时自动乘以此折扣。
-var videoInputRatioMap = map[string]float64{
-	"doubao-seedance-2-0-260128":      28.0 / 46.0, // ~0.6087
-	"doubao-seedance-2-0-fast-260128": 22.0 / 37.0, // ~0.5946
+const (
+	seedanceResolution480pRatio = 1.0
+	seedanceResolution720pRatio = 2.2
+	seedanceNoVideoInputRatio   = 1.0
+	seedanceHasVideoInputRatio  = 1.65
+)
+
+var seedanceFixedPriceModels = map[string]bool{
+	"doubao-seedance-2-0-260128":      true,
+	"doubao-seedance-2-0-fast-260128": true,
 }
 
-func GetVideoInputRatio(modelName string) (float64, bool) {
-	r, ok := videoInputRatioMap[modelName]
-	return r, ok
+func IsSeedanceFixedPriceModel(modelName string) bool {
+	return seedanceFixedPriceModels[modelName]
+}
+
+func NormalizeSeedanceResolution(resolution string) (string, float64, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(resolution))
+	switch normalized {
+	case "480p":
+		return normalized, seedanceResolution480pRatio, true
+	case "720p":
+		return normalized, seedanceResolution720pRatio, true
+	default:
+		return normalized, 0, false
+	}
+}
+
+func GetSeedanceVideoInputRatio(hasVideoInput bool) float64 {
+	if hasVideoInput {
+		return seedanceHasVideoInputRatio
+	}
+	return seedanceNoVideoInputRatio
 }

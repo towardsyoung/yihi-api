@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
@@ -116,7 +117,31 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
 	// Accept only POST /v1/video/generations as "generate" action.
-	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
+	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate); taskErr != nil {
+		return taskErr
+	}
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	modelName := req.Model
+	if modelName == "" {
+		modelName = info.OriginModelName
+	}
+	if !IsSeedanceFixedPriceModel(modelName) {
+		return nil
+	}
+	if _, ok := ratio_setting.GetModelPrice(modelName, false); !ok {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("seedance fixed-price model %s must configure ModelPrice", modelName), "model_price_error", http.StatusBadRequest)
+	}
+	body, err := a.convertToRequestPayload(cloneTaskSubmitReqForBilling(&req))
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := seedanceBillingFactors(body); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_seedance_billing_params", http.StatusBadRequest)
+	}
+	return nil
 }
 
 // BuildRequestURL constructs the upstream URL.
@@ -132,47 +157,72 @@ func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *r
 	return nil
 }
 
-// EstimateBilling 检测请求 metadata 中是否包含视频输入，返回视频折扣 OtherRatio。
+// EstimateBilling returns fixed-price multipliers for Seedance 2.0.
 func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
 	req, err := relaycommon.GetTaskRequest(c)
 	if err != nil {
 		return nil
 	}
-	if hasVideoInMetadata(req.Metadata) {
-		if ratio, ok := GetVideoInputRatio(info.OriginModelName); ok {
-			return map[string]float64{"video_input": ratio}
-		}
+	modelName := info.OriginModelName
+	if modelName == "" {
+		modelName = req.Model
 	}
-	return nil
+	if !IsSeedanceFixedPriceModel(modelName) {
+		return nil
+	}
+	body, err := a.convertToRequestPayload(cloneTaskSubmitReqForBilling(&req))
+	if err != nil {
+		return nil
+	}
+	factors, err := seedanceBillingFactors(body)
+	if err != nil {
+		return nil
+	}
+	return factors
 }
 
-// hasVideoInMetadata 直接检查 metadata 的 content 数组是否包含 video_url 条目，
-// 避免构建完整的上游 requestPayload。
-func hasVideoInMetadata(metadata map[string]interface{}) bool {
-	if metadata == nil {
-		return false
-	}
-	contentRaw, ok := metadata["content"]
-	if !ok {
-		return false
-	}
-	contentSlice, ok := contentRaw.([]interface{})
-	if !ok {
-		return false
-	}
-	for _, item := range contentSlice {
-		itemMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if itemMap["type"] == "video_url" {
-			return true
-		}
-		if _, has := itemMap["video_url"]; has {
+func hasVideoInContent(content []ContentItem) bool {
+	for _, item := range content {
+		if item.Type == "video_url" || item.VideoURL != nil {
 			return true
 		}
 	}
 	return false
+}
+
+func cloneTaskSubmitReqForBilling(req *relaycommon.TaskSubmitReq) *relaycommon.TaskSubmitReq {
+	clone := *req
+	if req.Metadata != nil {
+		clone.Metadata = make(map[string]interface{}, len(req.Metadata))
+		for k, v := range req.Metadata {
+			clone.Metadata[k] = v
+		}
+	}
+	return &clone
+}
+
+func seedanceBillingFactors(body *requestPayload) (map[string]float64, error) {
+	if body.Duration == nil {
+		return nil, fmt.Errorf("seedance duration is required")
+	}
+	seconds := int(*body.Duration)
+	if seconds <= 0 {
+		return nil, fmt.Errorf("seedance duration must be positive")
+	}
+
+	if body.Resolution == "" {
+		return nil, fmt.Errorf("seedance resolution is required")
+	}
+	_, resolutionRatio, ok := NormalizeSeedanceResolution(body.Resolution)
+	if !ok {
+		return nil, fmt.Errorf("seedance resolution must be 480p or 720p")
+	}
+
+	return map[string]float64{
+		"seconds":     float64(seconds),
+		"resolution":  resolutionRatio,
+		"video_input": GetSeedanceVideoInputRatio(hasVideoInContent(body.Content)),
+	}, nil
 }
 
 // BuildRequestBody converts request into Doubao specific format.
@@ -292,6 +342,8 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 
 	if sec, _ := strconv.Atoi(req.Seconds); sec > 0 {
 		r.Duration = lo.ToPtr(dto.IntValue(sec))
+	} else if req.Duration > 0 {
+		r.Duration = lo.ToPtr(dto.IntValue(req.Duration))
 	}
 
 	r.Content = lo.Reject(r.Content, func(c ContentItem, _ int) bool { return c.Type == "text" })
