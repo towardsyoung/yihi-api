@@ -291,6 +291,14 @@ func SetApiRouter(router *gin.Engine) {
 			}
 		}
 
+		dramaExternalRoute := apiRouter.Group("/external/drama")
+		dramaExternalRoute.Use(middleware.DramaExternalAuth())
+		{
+			dramaExternalRoute.POST("/provision", controller.DramaProvision)
+			dramaExternalRoute.GET("/users/:id/quota", controller.DramaUserQuota)
+			dramaExternalRoute.GET("/users/:id/quota_logs", controller.DramaUserQuotaLogs)
+		}
+
 		redemptionRoute := apiRouter.Group("/redemption")
 		redemptionRoute.Use(middleware.AdminAuth())
 		{
