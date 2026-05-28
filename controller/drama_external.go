@@ -25,36 +25,40 @@ type DramaProvisionRequest struct {
 	TokenQuota   int    `json:"token_quota"`
 }
 
-func DramaProvision(c *gin.Context) {
-	var req DramaProvisionRequest
+type DramaTokenProvisionRequest struct {
+	UserId     int    `json:"user_id" binding:"required"`
+	TokenName  string `json:"token_name" binding:"required"`
+	TokenGroup string `json:"token_group"`
+	TokenQuota int    `json:"token_quota"`
+}
+
+func DramaTokenProvision(c *gin.Context) {
+	var req DramaTokenProvisionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	req.Username = strings.TrimSpace(req.Username)
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-	req.Email = strings.TrimSpace(req.Email)
-	req.Group = strings.TrimSpace(req.Group)
 	req.TokenName = strings.TrimSpace(req.TokenName)
 	req.TokenGroup = strings.TrimSpace(req.TokenGroup)
-	if req.Group == "" {
-		req.Group = "default"
-	}
-	if req.TokenGroup == "" {
-		req.TokenGroup = req.Group
+	if req.UserId <= 0 {
+		common.ApiError(c, fmt.Errorf("user_id is required"))
+		return
 	}
 	if req.TokenName == "" {
-		req.TokenName = "drama-default"
+		common.ApiError(c, fmt.Errorf("token_name is required"))
+		return
 	}
-	if req.InitialQuota < 0 || req.TokenQuota < 0 {
+	if req.TokenGroup == "" {
+		req.TokenGroup = "default"
+	}
+	if req.TokenQuota < 0 {
 		common.ApiError(c, fmt.Errorf("quota cannot be negative"))
 		return
 	}
 
 	var user model.User
-	createdUser := false
+	var token model.Token
 	createdToken := false
-	grantedUserQuota := 0
 	grantedTokenQuota := 0
 
 	tx := model.DB.Begin()
@@ -64,56 +68,12 @@ func DramaProvision(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	err := tx.Where("username = ?", req.Username).First(&user).Error
-	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			common.ApiError(c, err)
-			return
-		}
-		password, err := common.Password2Hash(common.GetRandomString(16))
-		if err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		user = model.User{
-			Username:    req.Username,
-			Password:    password,
-			DisplayName: firstNonEmpty(req.DisplayName, req.Username),
-			Email:       req.Email,
-			Role:        common.RoleCommonUser,
-			Status:      common.UserStatusEnabled,
-			Group:       req.Group,
-			Quota:       req.InitialQuota,
-			AffCode:     common.GetRandomString(4),
-		}
-		if err := tx.Create(&user).Error; err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		createdUser = true
-		grantedUserQuota = req.InitialQuota
-	} else {
-		updates := map[string]interface{}{}
-		if user.DisplayName == "" && req.DisplayName != "" {
-			updates["display_name"] = req.DisplayName
-		}
-		if user.Email == "" && req.Email != "" {
-			updates["email"] = req.Email
-		}
-		if len(updates) > 0 {
-			if err := tx.Model(&model.User{}).Where("id = ?", user.Id).Updates(updates).Error; err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			if err := tx.Where("id = ?", user.Id).First(&user).Error; err != nil {
-				common.ApiError(c, err)
-				return
-			}
-		}
+	if err := tx.Where("id = ?", req.UserId).First(&user).Error; err != nil {
+		common.ApiError(c, err)
+		return
 	}
 
-	var token model.Token
-	err = tx.Where("user_id = ? AND name = ?", user.Id, req.TokenName).First(&token).Error
+	err := tx.Where("user_id = ? AND name = ?", user.Id, req.TokenName).First(&token).Error
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			common.ApiError(c, err)
@@ -150,8 +110,8 @@ func DramaProvision(c *gin.Context) {
 		return
 	}
 
-	if createdUser && grantedUserQuota > 0 {
-		model.RecordLog(user.Id, model.LogTypeSystem, fmt.Sprintf("drama provision granted %s", logger.LogQuota(grantedUserQuota)))
+	if createdToken && grantedTokenQuota > 0 {
+		recordDramaTokenLog(user.Id, token.Id, token.Name, token.Group, model.LogTypeSystem, grantedTokenQuota, fmt.Sprintf("drama token provision granted %s", logger.LogQuota(grantedTokenQuota)))
 	}
 
 	common.ApiSuccess(c, gin.H{
@@ -161,8 +121,6 @@ func DramaProvision(c *gin.Context) {
 			"display_name": user.DisplayName,
 			"email":        user.Email,
 			"group":        user.Group,
-			"quota":        user.Quota,
-			"used_quota":   user.UsedQuota,
 		},
 		"token": gin.H{
 			"id":              token.Id,
@@ -174,32 +132,32 @@ func DramaProvision(c *gin.Context) {
 			"unlimited_quota": token.UnlimitedQuota,
 			"expired_time":    token.ExpiredTime,
 		},
-		"created_user":        createdUser,
 		"created_token":       createdToken,
-		"granted_user_quota":  grantedUserQuota,
 		"granted_token_quota": grantedTokenQuota,
 	})
 }
 
-func DramaUserQuota(c *gin.Context) {
-	user, ok := getDramaUserByParam(c)
+func DramaTokenQuota(c *gin.Context) {
+	token, ok := getDramaTokenByParam(c)
 	if !ok {
 		return
 	}
 	common.ApiSuccess(c, gin.H{
-		"user_id":         user.Id,
-		"username":        user.Username,
-		"group":           user.Group,
-		"quota":           user.Quota,
-		"used_quota":      user.UsedQuota,
-		"total_granted":   user.Quota + user.UsedQuota,
-		"total_available": user.Quota,
-		"total_used":      user.UsedQuota,
+		"user_id":         token.UserId,
+		"token_id":        token.Id,
+		"token_name":      token.Name,
+		"group":           token.Group,
+		"quota":           token.RemainQuota,
+		"used_quota":      token.UsedQuota,
+		"total_granted":   token.RemainQuota + token.UsedQuota,
+		"total_available": token.RemainQuota,
+		"total_used":      token.UsedQuota,
+		"unlimited_quota": token.UnlimitedQuota,
 	})
 }
 
-func DramaUserQuotaLogs(c *gin.Context) {
-	user, ok := getDramaUserByParam(c)
+func DramaTokenQuotaLogs(c *gin.Context) {
+	token, ok := getDramaTokenByParam(c)
 	if !ok {
 		return
 	}
@@ -207,7 +165,7 @@ func DramaUserQuotaLogs(c *gin.Context) {
 	allowedTypes := []int{model.LogTypeTopup, model.LogTypeConsume, model.LogTypeManage, model.LogTypeSystem, model.LogTypeRefund}
 	var logs []*model.Log
 	var total int64
-	tx := model.LOG_DB.Model(&model.Log{}).Where("user_id = ? AND type IN ?", user.Id, allowedTypes)
+	tx := model.LOG_DB.Model(&model.Log{}).Where("token_id = ? AND type IN ?", token.Id, allowedTypes)
 	if err := tx.Count(&total).Error; err != nil {
 		common.ApiError(c, err)
 		return
@@ -242,6 +200,7 @@ func DramaUserQuotaLogs(c *gin.Context) {
 			"created_at":   log.CreatedAt,
 			"channel":      log.ChannelId,
 			"channel_name": log.ChannelName,
+			"content":      log.Content,
 		})
 	}
 
@@ -250,18 +209,36 @@ func DramaUserQuotaLogs(c *gin.Context) {
 	common.ApiSuccess(c, pageInfo)
 }
 
-func getDramaUserByParam(c *gin.Context) (*model.User, bool) {
+func getDramaTokenByParam(c *gin.Context) (*model.Token, bool) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid user id"})
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid token id"})
 		return nil, false
 	}
-	user, err := model.GetUserById(id, false)
+	token, err := model.GetTokenById(id)
 	if err != nil {
 		common.ApiError(c, err)
 		return nil, false
 	}
-	return user, true
+	return token, true
+}
+
+func recordDramaTokenLog(userId int, tokenId int, tokenName string, group string, logType int, quota int, content string) {
+	username, _ := model.GetUsernameById(userId, false)
+	log := &model.Log{
+		UserId:    userId,
+		Username:  username,
+		CreatedAt: common.GetTimestamp(),
+		Type:      logType,
+		Content:   content,
+		Quota:     quota,
+		TokenId:   tokenId,
+		TokenName: tokenName,
+		Group:     group,
+	}
+	if err := model.LOG_DB.Create(log).Error; err != nil {
+		common.SysLog("failed to record drama token log: " + err.Error())
+	}
 }
 
 func dramaLogTypeName(logType int) string {
