@@ -145,10 +145,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	info.InitChannelMeta(c)
 
 	// 1. 确定 platform → 创建适配器 → 验证请求
-	platform := constant.TaskPlatform(c.GetString("platform"))
-	if platform == "" {
-		platform = GetTaskPlatform(c)
-	}
+	platform := GetTaskPlatformWithInfo(c, info)
 	adaptor := GetTaskAdaptor(platform)
 	if adaptor == nil {
 		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("invalid api platform: %s", platform), "invalid_api_platform", http.StatusBadRequest)
