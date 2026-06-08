@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,6 +32,16 @@ type DramaTokenProvisionRequest struct {
 	TokenGroup string `json:"token_group"`
 	TokenQuota int    `json:"token_quota"`
 }
+
+type DramaTokenQuotaAddRequest struct {
+	TokenId  int    `json:"token_id" binding:"required"`
+	Delta    int    `json:"delta" binding:"required"`
+	Reason   string `json:"reason"`
+	UniqueId string `json:"unique_id" binding:"required"`
+}
+
+const defaultDramaTokenQuotaAddReason = "接口发放"
+const maxDramaTokenQuotaAddReasonLength = 512
 
 func DramaTokenProvision(c *gin.Context) {
 	var req DramaTokenProvisionRequest
@@ -137,6 +148,144 @@ func DramaTokenProvision(c *gin.Context) {
 	})
 }
 
+func DramaTokenQuotaAdd(c *gin.Context) {
+	pathTokenId, err := strconv.Atoi(c.Param("id"))
+	if err != nil || pathTokenId <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid token id"})
+		return
+	}
+
+	var req DramaTokenQuotaAddRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	req.UniqueId = strings.TrimSpace(req.UniqueId)
+	if req.TokenId != pathTokenId {
+		common.ApiError(c, fmt.Errorf("token_id does not match path token id"))
+		return
+	}
+	if req.Delta <= 0 {
+		common.ApiError(c, fmt.Errorf("delta must be greater than 0"))
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = defaultDramaTokenQuotaAddReason
+	} else if len(req.Reason) > maxDramaTokenQuotaAddReasonLength {
+		req.Reason = req.Reason[:maxDramaTokenQuotaAddReasonLength]
+	}
+	if req.UniqueId == "" {
+		common.ApiError(c, fmt.Errorf("unique_id is required"))
+		return
+	}
+	if len(req.UniqueId) > 256 {
+		common.ApiError(c, fmt.Errorf("unique_id is too long"))
+		return
+	}
+
+	lockKey := fmt.Sprintf("dq:%d", pathTokenId)
+	LockOrder(lockKey)
+	defer UnlockOrder(lockKey)
+
+	upstreamRequestId := dramaQuotaAddUpstreamRequestId(req.UniqueId)
+	result, err := addDramaTokenQuota(pathTokenId, req.Delta, req.Reason, upstreamRequestId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	result["unique_id"] = req.UniqueId
+	result["reason"] = req.Reason
+	common.ApiSuccess(c, result)
+}
+
+func addDramaTokenQuota(tokenId int, delta int, reason string, upstreamRequestId string) (gin.H, error) {
+	var result gin.H
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var token model.Token
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("id = ?", tokenId).First(&token).Error; err != nil {
+			return err
+		}
+
+		logDB := model.LOG_DB
+		if model.LOG_DB == model.DB {
+			logDB = tx
+		}
+
+		var existingLog model.Log
+		logQuery := logDB.Where("token_id = ? AND type = ? AND upstream_request_id = ?", token.Id, model.LogTypeSystem, upstreamRequestId).Limit(1).Find(&existingLog)
+		if logQuery.Error != nil {
+			return logQuery.Error
+		}
+		if logQuery.RowsAffected > 0 {
+			if existingLog.Quota != delta {
+				return fmt.Errorf("unique_id already used with different delta")
+			}
+			result = dramaTokenQuotaAddResponse(&token, delta, true)
+			return nil
+		}
+
+		if err := tx.Model(&model.Token{}).Where("id = ?", token.Id).Updates(map[string]interface{}{
+			"remain_quota":  gorm.Expr("remain_quota + ?", delta),
+			"accessed_time": common.GetTimestamp(),
+		}).Error; err != nil {
+			return err
+		}
+		token.RemainQuota += delta
+		token.AccessedTime = common.GetTimestamp()
+
+		username, _ := model.GetUsernameById(token.UserId, false)
+		content := fmt.Sprintf("drama token quota add %s, reason: %s", logger.LogQuota(delta), reason)
+		log := &model.Log{
+			UserId:            token.UserId,
+			Username:          username,
+			CreatedAt:         common.GetTimestamp(),
+			Type:              model.LogTypeSystem,
+			Content:           content,
+			Quota:             delta,
+			TokenId:           token.Id,
+			TokenName:         token.Name,
+			Group:             token.Group,
+			UpstreamRequestId: upstreamRequestId,
+			Other: common.MapToJsonStr(map[string]interface{}{
+				"source": "external_drama_quota_add",
+			}),
+		}
+		if err := logDB.Create(log).Error; err != nil {
+			return err
+		}
+		result = dramaTokenQuotaAddResponse(&token, delta, false)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	_, _ = model.GetTokenById(tokenId)
+	return result, nil
+}
+
+func dramaQuotaAddUpstreamRequestId(uniqueId string) string {
+	sum := sha256.Sum256([]byte(uniqueId))
+	return fmt.Sprintf("dq:%x", sum)
+}
+
+func dramaTokenQuotaAddResponse(token *model.Token, delta int, idempotent bool) gin.H {
+	return gin.H{
+		"user_id":         token.UserId,
+		"token_id":        token.Id,
+		"token_name":      token.Name,
+		"group":           token.Group,
+		"delta":           delta,
+		"idempotent":      idempotent,
+		"quota":           token.RemainQuota,
+		"used_quota":      token.UsedQuota,
+		"total_granted":   token.RemainQuota + token.UsedQuota,
+		"total_available": token.RemainQuota,
+		"total_used":      token.UsedQuota,
+		"unlimited_quota": token.UnlimitedQuota,
+	}
+}
+
 func DramaTokenQuota(c *gin.Context) {
 	token, ok := getDramaTokenByParam(c)
 	if !ok {
@@ -189,18 +338,19 @@ func DramaTokenQuotaLogs(c *gin.Context) {
 			displayQuota = -displayQuota
 		}
 		items = append(items, gin.H{
-			"id":           log.Id,
-			"type":         log.Type,
-			"type_name":    dramaLogTypeName(log.Type),
-			"quota":        displayQuota,
-			"raw_quota":    rawQuota,
-			"direction":    direction,
-			"model_name":   log.ModelName,
-			"token_name":   log.TokenName,
-			"created_at":   log.CreatedAt,
-			"channel":      log.ChannelId,
-			"channel_name": log.ChannelName,
-			"content":      log.Content,
+			"id":                  log.Id,
+			"type":                log.Type,
+			"type_name":           dramaLogTypeName(log.Type),
+			"quota":               displayQuota,
+			"raw_quota":           rawQuota,
+			"direction":           direction,
+			"model_name":          log.ModelName,
+			"token_name":          log.TokenName,
+			"created_at":          log.CreatedAt,
+			"channel":             log.ChannelId,
+			"channel_name":        log.ChannelName,
+			"content":             log.Content,
+			"upstream_request_id": log.UpstreamRequestId,
 		})
 	}
 

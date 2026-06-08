@@ -296,6 +296,7 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			dramaExternalRoute.POST("/tokens/provision", controller.DramaTokenProvision)
 			dramaExternalRoute.GET("/tokens/:id/quota", controller.DramaTokenQuota)
+			dramaExternalRoute.POST("/tokens/:id/quota/add", controller.DramaTokenQuotaAdd)
 			dramaExternalRoute.GET("/tokens/:id/quota_logs", controller.DramaTokenQuotaLogs)
 		}
 
