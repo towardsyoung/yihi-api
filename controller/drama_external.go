@@ -189,7 +189,7 @@ func DramaTokenQuotaAdd(c *gin.Context) {
 	defer UnlockOrder(lockKey)
 
 	upstreamRequestId := dramaQuotaAddUpstreamRequestId(req.UniqueId)
-	result, err := addDramaTokenQuota(pathTokenId, req.Delta, req.Reason, upstreamRequestId)
+	result, err := addDramaTokenQuota(pathTokenId, req.Delta, req.Reason, req.UniqueId, upstreamRequestId)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -199,7 +199,7 @@ func DramaTokenQuotaAdd(c *gin.Context) {
 	common.ApiSuccess(c, result)
 }
 
-func addDramaTokenQuota(tokenId int, delta int, reason string, upstreamRequestId string) (gin.H, error) {
+func addDramaTokenQuota(tokenId int, delta int, reason string, uniqueId string, upstreamRequestId string) (gin.H, error) {
 	var result gin.H
 	err := model.DB.Transaction(func(tx *gorm.DB) error {
 		var token model.Token
@@ -248,7 +248,8 @@ func addDramaTokenQuota(tokenId int, delta int, reason string, upstreamRequestId
 			Group:             token.Group,
 			UpstreamRequestId: upstreamRequestId,
 			Other: common.MapToJsonStr(map[string]interface{}{
-				"source": "external_drama_quota_add",
+				"source":    "external_drama_quota_add",
+				"unique_id": uniqueId,
 			}),
 		}
 		if err := logDB.Create(log).Error; err != nil {

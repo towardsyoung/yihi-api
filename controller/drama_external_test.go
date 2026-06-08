@@ -89,9 +89,10 @@ func seedDramaToken(t *testing.T, db *gorm.DB) *model.Token {
 func TestAddDramaTokenQuotaIdempotent(t *testing.T) {
 	db := setupDramaExternalTestDB(t)
 	token := seedDramaToken(t, db)
-	upstreamRequestId := dramaQuotaAddUpstreamRequestId("event-001")
+	uniqueId := "event-001"
+	upstreamRequestId := dramaQuotaAddUpstreamRequestId(uniqueId)
 
-	result, err := addDramaTokenQuota(token.Id, 50, "task completed", upstreamRequestId)
+	result, err := addDramaTokenQuota(token.Id, 50, "task completed", uniqueId, upstreamRequestId)
 	require.NoError(t, err)
 	require.Equal(t, false, result["idempotent"])
 	require.Equal(t, 150, result["quota"])
@@ -106,8 +107,11 @@ func TestAddDramaTokenQuotaIdempotent(t *testing.T) {
 	require.NoError(t, db.Where("token_id = ? AND upstream_request_id = ?", token.Id, upstreamRequestId).First(&log).Error)
 	require.Contains(t, log.Content, "task completed")
 	require.Equal(t, 50, log.Quota)
+	other, err := common.StrToMap(log.Other)
+	require.NoError(t, err)
+	require.Equal(t, uniqueId, other["unique_id"])
 
-	result, err = addDramaTokenQuota(token.Id, 50, "task completed", upstreamRequestId)
+	result, err = addDramaTokenQuota(token.Id, 50, "task completed", uniqueId, upstreamRequestId)
 	require.NoError(t, err)
 	require.Equal(t, true, result["idempotent"])
 	require.Equal(t, 150, result["quota"])
@@ -120,12 +124,13 @@ func TestAddDramaTokenQuotaIdempotent(t *testing.T) {
 func TestAddDramaTokenQuotaRejectsUniqueIdWithDifferentDelta(t *testing.T) {
 	db := setupDramaExternalTestDB(t)
 	token := seedDramaToken(t, db)
-	upstreamRequestId := dramaQuotaAddUpstreamRequestId("event-002")
+	uniqueId := "event-002"
+	upstreamRequestId := dramaQuotaAddUpstreamRequestId(uniqueId)
 
-	_, err := addDramaTokenQuota(token.Id, 50, "task completed", upstreamRequestId)
+	_, err := addDramaTokenQuota(token.Id, 50, "task completed", uniqueId, upstreamRequestId)
 	require.NoError(t, err)
 
-	_, err = addDramaTokenQuota(token.Id, 60, "task completed", upstreamRequestId)
+	_, err = addDramaTokenQuota(token.Id, 60, "task completed", uniqueId, upstreamRequestId)
 	require.Error(t, err)
 
 	var updated model.Token
