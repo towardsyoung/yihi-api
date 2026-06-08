@@ -235,7 +235,7 @@ func addDramaTokenQuota(tokenId int, delta int, reason string, uniqueId string, 
 		token.AccessedTime = common.GetTimestamp()
 
 		username, _ := model.GetUsernameById(token.UserId, false)
-		content := fmt.Sprintf("drama token quota add %s, reason: %s", logger.LogQuota(delta), reason)
+		content := reason
 		log := &model.Log{
 			UserId:            token.UserId,
 			Username:          username,

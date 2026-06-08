@@ -106,6 +106,7 @@ func TestAddDramaTokenQuotaIdempotent(t *testing.T) {
 	var log model.Log
 	require.NoError(t, db.Where("token_id = ? AND upstream_request_id = ?", token.Id, upstreamRequestId).First(&log).Error)
 	require.Contains(t, log.Content, "task completed")
+	require.Contains(t, log.Content, "50 credits")
 	require.Equal(t, 50, log.Quota)
 	other, err := common.StrToMap(log.Other)
 	require.NoError(t, err)
