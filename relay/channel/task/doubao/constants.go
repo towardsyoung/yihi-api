@@ -18,6 +18,13 @@ const (
 	seedanceResolution720pRatio = 2.2
 	seedanceNoVideoInputRatio   = 1.0
 	seedanceHasVideoInputRatio  = 1.65
+
+	seedanceUpscaleStageSeedance     = "seedance"
+	seedanceUpscaleStageUpscale      = "upscale"
+	seedanceUpscaleProgress          = "70%"
+	seedanceUpscaleDefaultMaxRetries = 3
+	seedanceUpscaleTaskPrefix        = "amk-tool-enhance-video-generative-"
+	seedanceUpscaleBaseURL           = "https://mediakit.cn-beijing.volces.com"
 )
 
 var seedanceFixedPriceModels = map[string]bool{

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -128,15 +129,22 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	if modelName == "" {
 		modelName = info.OriginModelName
 	}
-	if !IsSeedanceFixedPriceModel(modelName) {
-		return nil
-	}
-	if _, ok := ratio_setting.GetModelPrice(modelName, false); !ok {
-		return service.TaskErrorWrapperLocal(fmt.Errorf("seedance fixed-price model %s must configure ModelPrice", modelName), "model_price_error", http.StatusBadRequest)
-	}
 	body, err := a.convertToRequestPayload(cloneTaskSubmitReqForBilling(&req))
 	if err != nil {
 		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	priceModelName := modelName
+	if plan, ok, err := resolveConfiguredSeedanceUpscalePlan(info, modelName, body.Resolution); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_seedance_upscale_config", http.StatusBadRequest)
+	} else if ok {
+		priceModelName = plan.BillingModelName
+		applySeedanceUpscalePlan(info, plan)
+		body.Resolution = plan.SourceResolution
+	} else if !IsSeedanceFixedPriceModel(modelName) {
+		return nil
+	}
+	if _, ok := ratio_setting.GetModelPrice(priceModelName, false); !ok {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("seedance fixed-price model %s must configure ModelPrice", priceModelName), "model_price_error", http.StatusBadRequest)
 	}
 	if _, err := seedanceBillingFactors(body); err != nil {
 		return service.TaskErrorWrapperLocal(err, "invalid_seedance_billing_params", http.StatusBadRequest)
@@ -167,11 +175,16 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	if modelName == "" {
 		modelName = req.Model
 	}
-	if !IsSeedanceFixedPriceModel(modelName) {
-		return nil
-	}
 	body, err := a.convertToRequestPayload(cloneTaskSubmitReqForBilling(&req))
 	if err != nil {
+		return nil
+	}
+	if plan, ok, err := resolveConfiguredSeedanceUpscalePlan(info, modelName, body.Resolution); err != nil {
+		return nil
+	} else if ok {
+		applySeedanceUpscalePlan(info, plan)
+		body.Resolution = plan.SourceResolution
+	} else if !IsSeedanceFixedPriceModel(modelName) {
 		return nil
 	}
 	factors, err := seedanceBillingFactors(body)
@@ -236,9 +249,22 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if err != nil {
 		return nil, errors.Wrap(err, "convert request payload failed")
 	}
-	if info.IsModelMapped {
+	modelName := info.OriginModelName
+	if modelName == "" {
+		modelName = body.Model
+	}
+	if plan, ok, err := resolveConfiguredSeedanceUpscalePlan(info, modelName, body.Resolution); err != nil {
+		return nil, err
+	} else if ok {
+		applySeedanceUpscalePlan(info, plan)
+		body.Resolution = plan.SourceResolution
+		body.Model = plan.UpstreamModelName
+		info.UpstreamModelName = plan.UpstreamModelName
+		info.IsModelMapped = plan.UpstreamModelName != modelName
+	} else if info.IsModelMapped {
 		body.Model = info.UpstreamModelName
-	} else {
+	}
+	if info.UpstreamModelName == "" {
 		info.UpstreamModelName = body.Model
 	}
 	data, err := common.Marshal(body)
@@ -246,6 +272,118 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		return nil, err
 	}
 	return bytes.NewReader(data), nil
+}
+
+type seedanceUpscalePlan struct {
+	ExternalModelName string
+	UpstreamModelName string
+	BillingModelName  string
+	APIKey            string
+	SourceResolution  string
+	TargetResolution  string
+	MaxRetries        int
+}
+
+func resolveConfiguredSeedanceUpscalePlan(info *relaycommon.RelayInfo, modelName, resolution string) (seedanceUpscalePlan, bool, error) {
+	if info == nil || info.ChannelMeta == nil || len(info.ChannelMeta.ChannelOtherSettings.SeedanceUpscale) == 0 {
+		return seedanceUpscalePlan{}, false, nil
+	}
+	cfg, ok := info.ChannelMeta.ChannelOtherSettings.SeedanceUpscale[modelName]
+	if !ok || !cfg.Enabled {
+		return seedanceUpscalePlan{}, false, nil
+	}
+	if !seedanceUpscaleGroupAllowed(info, cfg.Groups) {
+		return seedanceUpscalePlan{}, false, nil
+	}
+	normalized, _, ok := NormalizeSeedanceResolution(resolution)
+	if !ok {
+		normalized = strings.ToLower(strings.TrimSpace(resolution))
+	}
+	rule, ok := cfg.Rules[normalized]
+	if !ok {
+		return seedanceUpscalePlan{}, false, nil
+	}
+	upstreamModel := strings.TrimSpace(cfg.MapModel)
+	if upstreamModel == "" {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s must configure map_model", modelName)
+	}
+	if strings.TrimSpace(rule.BillingModel) == "" {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s resolution %s missing billing_model", modelName, normalized)
+	}
+	if strings.TrimSpace(rule.SeedanceResolution) == "" || strings.TrimSpace(rule.UpscaleResolution) == "" {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s resolution %s missing seedance_resolution or upscale_resolution", modelName, normalized)
+	}
+	if provider := strings.TrimSpace(cfg.Upscale.Provider); provider != "" && !strings.EqualFold(provider, "doubao") {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("unsupported seedance upscale provider %s", provider)
+	}
+	apiKey := strings.TrimSpace(cfg.Upscale.APIKey)
+	if apiKey == "" {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s must configure upscale.api_key", modelName)
+	}
+	maxRetries := cfg.Upscale.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = seedanceUpscaleDefaultMaxRetries
+	}
+	return seedanceUpscalePlan{
+		ExternalModelName: modelName,
+		UpstreamModelName: upstreamModel,
+		BillingModelName:  strings.TrimSpace(rule.BillingModel),
+		APIKey:            apiKey,
+		SourceResolution:  strings.ToLower(strings.TrimSpace(rule.SeedanceResolution)),
+		TargetResolution:  strings.ToLower(strings.TrimSpace(rule.UpscaleResolution)),
+		MaxRetries:        maxRetries,
+	}, true, nil
+}
+
+func seedanceUpscaleGroupAllowed(info *relaycommon.RelayInfo, groups []string) bool {
+	if len(groups) == 0 {
+		return true
+	}
+	groupSet := make(map[string]bool, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			groupSet[group] = true
+		}
+	}
+	for _, group := range []string{info.TokenGroup, info.UsingGroup, info.UserGroup} {
+		if groupSet[strings.TrimSpace(group)] {
+			return true
+		}
+	}
+	return false
+}
+
+func applySeedanceUpscalePlan(info *relaycommon.RelayInfo, plan seedanceUpscalePlan) {
+	info.BillingModelName = plan.BillingModelName
+	info.VideoUpscale = &relaycommon.VideoUpscaleRelayInfo{
+		Enabled:          true,
+		Stage:            seedanceUpscaleStageSeedance,
+		BillingModelName: plan.BillingModelName,
+		APIKey:           plan.APIKey,
+		SourceResolution: plan.SourceResolution,
+		TargetResolution: plan.TargetResolution,
+		MaxRetries:       plan.MaxRetries,
+	}
+}
+
+func (a *TaskAdaptor) BuildTaskPrivateDataPatch(info *relaycommon.RelayInfo, upstreamTaskID string, _ []byte) model.TaskPrivateData {
+	if info == nil || info.VideoUpscale == nil || !info.VideoUpscale.Enabled {
+		return model.TaskPrivateData{}
+	}
+	upscale := info.VideoUpscale
+	return model.TaskPrivateData{
+		Upscale: &model.VideoUpscaleContext{
+			Enabled:          true,
+			Stage:            upscale.Stage,
+			BillingModelName: upscale.BillingModelName,
+			APIKey:           upscale.APIKey,
+			SeedanceTaskID:   upstreamTaskID,
+			SourceResolution: upscale.SourceResolution,
+			TargetResolution: upscale.TargetResolution,
+			MaxRetries:       upscale.MaxRetries,
+		},
+	}
 }
 
 // DoRequest delegates to common helper.
@@ -289,6 +427,9 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
+	}
+	if isSeedanceUpscaleTaskID(taskID) {
+		return a.fetchUpscaleTask(key, taskID, proxy)
 	}
 
 	uri := fmt.Sprintf("%s/api/v3/contents/generations/tasks/%s", baseUrl, taskID)
@@ -356,6 +497,10 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 }
 
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
+	if taskResult, ok, err := parseUpscaleTaskResult(respBody); ok || err != nil {
+		return taskResult, err
+	}
+
 	resTask := responseTask{}
 	if err := common.Unmarshal(respBody, &resTask); err != nil {
 		return nil, errors.Wrap(err, "unmarshal task result failed")

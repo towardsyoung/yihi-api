@@ -50,9 +50,15 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = info.UpstreamModelName
 	}
+	logModelName := info.OriginModelName
+	if info.BillingModelName != "" {
+		logModelName = info.BillingModelName
+		other["origin_model_name"] = info.OriginModelName
+		other["billing_model_name"] = info.BillingModelName
+	}
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
 		ChannelId: info.ChannelId,
-		ModelName: info.OriginModelName,
+		ModelName: logModelName,
 		TokenName: tokenName,
 		Quota:     info.PriceData.Quota,
 		Content:   logContent,
@@ -121,6 +127,10 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 	other := make(map[string]interface{})
 	if bc := task.PrivateData.BillingContext; bc != nil {
 		other["model_price"] = bc.ModelPrice
+		if bc.BillingModelName != "" {
+			other["billing_model_name"] = bc.BillingModelName
+			other["origin_model_name"] = bc.OriginModelName
+		}
 		if bc.ModelRatio > 0 {
 			other["model_ratio"] = bc.ModelRatio
 		}
@@ -141,6 +151,9 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 
 // taskModelName 从 BillingContext 或 Properties 中获取模型名称。
 func taskModelName(task *model.Task) string {
+	if bc := task.PrivateData.BillingContext; bc != nil && bc.BillingModelName != "" {
+		return bc.BillingModelName
+	}
 	if bc := task.PrivateData.BillingContext; bc != nil && bc.OriginModelName != "" {
 		return bc.OriginModelName
 	}

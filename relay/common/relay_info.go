@@ -103,6 +103,8 @@ type RelayInfo struct {
 	UsePrice               bool
 	RelayMode              int
 	OriginModelName        string
+	BillingModelName       string
+	VideoUpscale           *VideoUpscaleRelayInfo
 	RequestURLPath         string
 	RequestHeaders         map[string]string
 	ShouldIncludeUsage     bool
@@ -664,6 +666,16 @@ func (info *RelayInfo) SetFirstResponseTime() {
 
 func (info *RelayInfo) HasSendResponse() bool {
 	return info.FirstResponseTime.After(info.StartTime)
+}
+
+type VideoUpscaleRelayInfo struct {
+	Enabled          bool
+	Stage            string
+	BillingModelName string
+	APIKey           string
+	SourceResolution string
+	TargetResolution string
+	MaxRetries       int
 }
 
 type TaskRelayInfo struct {

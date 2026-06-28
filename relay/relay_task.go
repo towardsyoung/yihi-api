@@ -23,11 +23,16 @@ import (
 )
 
 type TaskSubmitResult struct {
-	UpstreamTaskID string
-	TaskData       []byte
-	Platform       constant.TaskPlatform
-	Quota          int
+	UpstreamTaskID   string
+	TaskData         []byte
+	Platform         constant.TaskPlatform
+	Quota            int
+	PrivateDataPatch model.TaskPrivateData
 	//PerCallPrice   types.PriceData
+}
+
+type taskPrivateDataBuilder interface {
+	BuildTaskPrivateDataPatch(info *relaycommon.RelayInfo, upstreamTaskID string, taskData []byte) model.TaskPrivateData
 }
 
 // ResolveOriginTask 处理基于已有任务的提交（remix / continuation）：
@@ -246,12 +251,16 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		info.PriceData.Quota = finalQuota
 	}
 
-	return &TaskSubmitResult{
+	result := &TaskSubmitResult{
 		UpstreamTaskID: upstreamTaskID,
 		TaskData:       taskData,
 		Platform:       platform,
 		Quota:          finalQuota,
-	}, nil
+	}
+	if builder, ok := adaptor.(taskPrivateDataBuilder); ok {
+		result.PrivateDataPatch = builder.BuildTaskPrivateDataPatch(info, upstreamTaskID, taskData)
+	}
+	return result, nil
 }
 
 // recalcQuotaFromRatios 根据 adjustedRatios 重新计算 quota。

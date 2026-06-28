@@ -31,6 +31,11 @@ type TaskPollingAdaptor interface {
 	AdjustBillingOnComplete(task *model.Task, taskResult *relaycommon.TaskInfo) int
 }
 
+type TaskPostProcessor interface {
+	HandlePostProcessSuccess(ctx context.Context, task *model.Task, taskResult *relaycommon.TaskInfo, baseURL string, key string, proxy string) (bool, error)
+	HandlePostProcessFailure(ctx context.Context, task *model.Task, taskResult *relaycommon.TaskInfo, baseURL string, key string, proxy string) (bool, error)
+}
+
 // GetTaskAdaptorFunc 由 main 包注入，用于获取指定平台的任务适配器。
 // 打破 service -> relay -> relay/channel -> service 的循环依赖。
 var GetTaskAdaptorFunc func(platform constant.TaskPlatform) TaskPollingAdaptor
@@ -359,6 +364,11 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	if privateData.Key != "" {
 		key = privateData.Key
 	}
+	if privateData.Upscale != nil &&
+		privateData.Upscale.Stage == "upscale" &&
+		strings.TrimSpace(privateData.Upscale.APIKey) != "" {
+		key = strings.TrimSpace(privateData.Upscale.APIKey)
+	}
 	resp, err := adaptor.FetchTask(baseURL, key, map[string]any{
 		"task_id": task.GetUpstreamTaskID(),
 		"action":  task.Action,
@@ -421,6 +431,8 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	shouldRefund := false
 	shouldSettle := false
+	forceUpdate := false
+	postProcessHandled := false
 	quota := task.Quota
 
 	task.Status = model.TaskStatus(taskResult.Status)
@@ -435,6 +447,20 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 			task.StartTime = now
 		}
 	case model.TaskStatusSuccess:
+		if processor, ok := adaptor.(TaskPostProcessor); ok {
+			handled, err := processor.HandlePostProcessSuccess(ctx, task, taskResult, baseURL, key, proxy)
+			if err != nil {
+				return fmt.Errorf("post process success failed for task %s: %w", task.TaskID, err)
+			}
+			if handled {
+				postProcessHandled = true
+				forceUpdate = true
+				if task.Status == model.TaskStatusFailure && quota != 0 {
+					shouldRefund = true
+				}
+				break
+			}
+		}
 		task.Progress = taskcommon.ProgressComplete
 		if task.FinishTime == 0 {
 			task.FinishTime = now
@@ -451,6 +477,28 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		}
 		shouldSettle = true
 	case model.TaskStatusFailure:
+		if processor, ok := adaptor.(TaskPostProcessor); ok {
+			handled, err := processor.HandlePostProcessFailure(ctx, task, taskResult, baseURL, key, proxy)
+			if err != nil {
+				return fmt.Errorf("post process failure failed for task %s: %w", task.TaskID, err)
+			}
+			if handled {
+				postProcessHandled = true
+				forceUpdate = true
+				if task.Status == model.TaskStatusFailure {
+					if task.FinishTime == 0 {
+						task.FinishTime = now
+					}
+					if task.FailReason == "" {
+						task.FailReason = taskResult.Reason
+					}
+					if quota != 0 {
+						shouldRefund = true
+					}
+				}
+				break
+			}
+		}
 		logger.LogJson(ctx, fmt.Sprintf("Task %s failed", taskId), task)
 		task.Status = model.TaskStatusFailure
 		task.Progress = taskcommon.ProgressComplete
@@ -466,7 +514,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	default:
 		return fmt.Errorf("unknown task status %s for task %s", taskResult.Status, task.TaskID)
 	}
-	if taskResult.Progress != "" {
+	if taskResult.Progress != "" && !postProcessHandled {
 		task.Progress = taskResult.Progress
 	}
 
@@ -482,7 +530,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 			shouldRefund = false
 			shouldSettle = false
 		}
-	} else if !snap.Equal(task.Snapshot()) {
+	} else if forceUpdate || !snap.Equal(task.Snapshot()) {
 		if _, err := task.UpdateWithStatus(snap.Status); err != nil {
 			logger.LogError(ctx, fmt.Sprintf("Failed to update task %s: %s", task.TaskID, err.Error()))
 		}
