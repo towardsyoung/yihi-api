@@ -208,6 +208,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.param_override?.trim() ||
     values.header_override?.trim() ||
     values.status_code_mapping?.trim() ||
+    values.seedance_upscale?.trim() ||
     values.tag?.trim() ||
     values.remark?.trim() ||
     values.priority ||
@@ -2645,6 +2646,75 @@ export function ChannelMutateDrawer({
                           title={t('Override Rules')}
                           icon={<Code className='h-3.5 w-3.5' />}
                         />
+
+                        {currentType === 54 && (
+                          <FormField
+                            control={form.control}
+                            name='seedance_upscale'
+                            render={({ field }) => (
+                              <FormItem className='space-y-3'>
+                                <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
+                                  <div className='space-y-1'>
+                                    <FormLabel>seedance_upscale</FormLabel>
+                                    <FormDescription>
+                                      {t(
+                                        'Channel-specific settings (JSON format)'
+                                      )}
+                                    </FormDescription>
+                                  </div>
+                                  <Button
+                                    type='button'
+                                    variant='outline'
+                                    size='sm'
+                                    onClick={() => {
+                                      try {
+                                        const parsed = JSON.parse(
+                                          field.value || '{}'
+                                        )
+                                        field.onChange(
+                                          JSON.stringify(parsed, null, 2)
+                                        )
+                                      } catch (_e) {
+                                        /* ignore invalid JSON */
+                                      }
+                                    }}
+                                  >
+                                    {t('Format')}
+                                  </Button>
+                                </div>
+                                <FormControl>
+                                  <Textarea
+                                    className='font-mono text-sm'
+                                    rows={10}
+                                    value={field.value || ''}
+                                    onChange={field.onChange}
+                                    disabled={isSubmitting}
+                                    placeholder={`{
+  "doubao-seedance-2-0-260128-g1": {
+    "enabled": true,
+    "map_model": "doubao-seedance-2-0-260128",
+    "groups": ["yihi-default"],
+    "rules": {
+      "720p": {
+        "seedance_resolution": "480p",
+        "upscale_resolution": "720p",
+        "billing_model": "doubao-seedance-2-upscale-720p"
+      }
+    },
+    "upscale": {
+      "provider": "doubao",
+      "api_key": "xxx",
+      "max_retries": 3
+    }
+  }
+}`}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        )}
 
                         <FormField
                           control={form.control}

@@ -17,6 +17,7 @@ import (
 type upscaleSubmitRequest struct {
 	VideoURL   string `json:"video_url"`
 	Resolution string `json:"resolution"`
+	Scene      string `json:"scene"`
 }
 
 type upscaleSubmitResponse struct {
@@ -66,13 +67,14 @@ func (a *TaskAdaptor) submitUpscaleTask(key, proxy, videoURL, targetResolution s
 	payload := upscaleSubmitRequest{
 		VideoURL:   videoURL,
 		Resolution: targetResolution,
+		Scene:      seedanceUpscaleScene,
 	}
 	data, err := common.Marshal(payload)
 	if err != nil {
 		return "", nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, seedanceUpscaleBaseURL+"/api/v1/tools/enhance-video-generative", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, seedanceUpscaleBaseURL+"/api/v1/tools/enhance-video", bytes.NewReader(data))
 	if err != nil {
 		return "", nil, err
 	}
@@ -116,7 +118,7 @@ func parseUpscaleTaskResult(respBody []byte) (*relaycommon.TaskInfo, bool, error
 	if err := common.Unmarshal(respBody, &res); err != nil {
 		return nil, false, nil
 	}
-	if res.TaskType != "enhance-video-generative" && !isSeedanceUpscaleTaskID(res.TaskID) {
+	if !isSeedanceUpscaleTaskType(res.TaskType) && !isSeedanceUpscaleTaskID(res.TaskID) {
 		return nil, false, nil
 	}
 
@@ -141,6 +143,15 @@ func parseUpscaleTaskResult(respBody []byte) (*relaycommon.TaskInfo, bool, error
 		taskResult.Progress = seedanceUpscaleProgress
 	}
 	return &taskResult, true, nil
+}
+
+func isSeedanceUpscaleTaskType(taskType string) bool {
+	switch strings.ToLower(strings.TrimSpace(taskType)) {
+	case "enhance-video", "enhance-video-generative":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *TaskAdaptor) HandlePostProcessSuccess(ctx context.Context, task *model.Task, taskResult *relaycommon.TaskInfo, _ string, key string, proxy string) (bool, error) {

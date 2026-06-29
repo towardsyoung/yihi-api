@@ -234,21 +234,21 @@ func TestBuildTaskPrivateDataPatchForSeedanceUpscale(t *testing.T) {
 }
 
 func TestParseUpscaleTaskResult(t *testing.T) {
-	completed := []byte(`{"success":true,"task_id":"amk-tool-enhance-video-generative-1","task_type":"enhance-video-generative","status":"completed","result":{"resolution":"720p","video_url":"https://example.com/upscaled.mp4"}}`)
+	completed := []byte(`{"success":true,"task_id":"amk-tool-enhance-video-1","task_type":"enhance-video","status":"completed","result":{"resolution":"720p","video_url":"https://example.com/upscaled.mp4"}}`)
 	taskResult, ok, err := parseUpscaleTaskResult(completed)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "SUCCESS", taskResult.Status)
 	require.Equal(t, "https://example.com/upscaled.mp4", taskResult.Url)
 
-	running := []byte(`{"success":true,"task_id":"amk-tool-enhance-video-generative-1","task_type":"enhance-video-generative","status":"running"}`)
-	taskResult, ok, err = parseUpscaleTaskResult(running)
+	legacyRunning := []byte(`{"success":true,"task_id":"amk-tool-enhance-video-generative-1","task_type":"enhance-video-generative","status":"running"}`)
+	taskResult, ok, err = parseUpscaleTaskResult(legacyRunning)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "IN_PROGRESS", taskResult.Status)
 	require.Equal(t, seedanceUpscaleProgress, taskResult.Progress)
 
-	failed := []byte(`{"success":true,"task_id":"amk-tool-enhance-video-generative-1","task_type":"enhance-video-generative","status":"failed","message":"bad video"}`)
+	failed := []byte(`{"success":true,"task_id":"amk-tool-enhance-video-1","task_type":"enhance-video","status":"failed","message":"bad video"}`)
 	taskResult, ok, err = parseUpscaleTaskResult(failed)
 	require.NoError(t, err)
 	require.True(t, ok)

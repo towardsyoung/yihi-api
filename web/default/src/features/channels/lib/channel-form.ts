@@ -169,6 +169,10 @@ export const channelFormSchema = z
       .string()
       .optional()
       .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON),
+    seedance_upscale: z
+      .string()
+      .optional()
+      .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON),
     other: z.string().optional(),
     // Multi-key options (not sent to backend directly)
     multi_key_mode: z.enum(['single', 'batch', 'multi_to_single']).optional(),
@@ -288,6 +292,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   param_override: '',
   header_override: '',
   settings: '{}',
+  seedance_upscale: '',
   other: '',
   multi_key_mode: 'single',
   multi_key_type: 'random',
@@ -370,6 +375,7 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
+  let seedanceUpscale = ''
 
   if (channel.settings) {
     try {
@@ -394,6 +400,13 @@ export function transformChannelToFormDefaults(
       )
         ? parsed.upstream_model_update_ignored_models.join(',')
         : ''
+      if (
+        parsed.seedance_upscale &&
+        typeof parsed.seedance_upscale === 'object' &&
+        !Array.isArray(parsed.seedance_upscale)
+      ) {
+        seedanceUpscale = JSON.stringify(parsed.seedance_upscale, null, 2)
+      }
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Failed to parse channel settings:', error)
@@ -421,6 +434,7 @@ export function transformChannelToFormDefaults(
     param_override: channel.param_override || '',
     header_override: channel.header_override || '',
     settings: channel.settings || '{}',
+    seedance_upscale: seedanceUpscale,
     other: channel.other || '',
     multi_key_mode: 'single',
     multi_key_type: channel.channel_info.multi_key_mode || 'random',
@@ -565,6 +579,12 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     if (typeof settingsObj.upstream_model_update_last_check_time !== 'number') {
       settingsObj.upstream_model_update_last_check_time = 0
     }
+  }
+
+  if (formData.type === 45 && formData.seedance_upscale?.trim()) {
+    settingsObj.seedance_upscale = JSON.parse(formData.seedance_upscale)
+  } else if ('seedance_upscale' in settingsObj) {
+    delete settingsObj.seedance_upscale
   }
 
   return JSON.stringify(settingsObj)

@@ -196,6 +196,7 @@ const EditChannelModal = (props) => {
     system_prompt: '',
     system_prompt_override: false,
     settings: '',
+    seedance_upscale: '',
     // 仅 Vertex: 密钥格式（存入 settings.vertex_key_type）
     vertex_key_type: 'json',
     // 仅 AWS: 密钥格式和区域（存入 settings.aws_key_type 和 settings.aws_region）
@@ -927,6 +928,12 @@ const EditChannelModal = (props) => {
           )
             ? parsedSettings.upstream_model_update_ignored_models.join(',')
             : '';
+          data.seedance_upscale =
+            parsedSettings.seedance_upscale &&
+            typeof parsedSettings.seedance_upscale === 'object' &&
+            !Array.isArray(parsedSettings.seedance_upscale)
+              ? JSON.stringify(parsedSettings.seedance_upscale, null, 2)
+              : '';
         } catch (error) {
           console.error('解析其他设置失败:', error);
           data.azure_responses_version = '';
@@ -946,6 +953,7 @@ const EditChannelModal = (props) => {
           data.upstream_model_update_last_check_time = 0;
           data.upstream_model_update_last_detected_models = [];
           data.upstream_model_update_ignored_models = '';
+          data.seedance_upscale = '';
         }
       } else {
         // 兼容历史数据：老渠道没有 settings 时，默认按 json 展示
@@ -964,6 +972,7 @@ const EditChannelModal = (props) => {
         data.upstream_model_update_last_check_time = 0;
         data.upstream_model_update_last_detected_models = [];
         data.upstream_model_update_ignored_models = '';
+        data.seedance_upscale = '';
       }
 
       if (
@@ -1826,6 +1835,17 @@ const EditChannelModal = (props) => {
       settings.upstream_model_update_last_check_time = 0;
     }
 
+    if (localInputs.type === 45 && localInputs.seedance_upscale?.trim()) {
+      try {
+        settings.seedance_upscale = JSON.parse(localInputs.seedance_upscale);
+      } catch (error) {
+        showError(`${t('JSON格式错误')}: ${error.message}`);
+        return;
+      }
+    } else if ('seedance_upscale' in settings) {
+      delete settings.seedance_upscale;
+    }
+
     localInputs.settings = JSON.stringify(settings);
 
     // 清理不需要发送到后端的字段
@@ -1853,6 +1873,7 @@ const EditChannelModal = (props) => {
     delete localInputs.upstream_model_update_last_check_time;
     delete localInputs.upstream_model_update_last_detected_models;
     delete localInputs.upstream_model_update_ignored_models;
+    delete localInputs.seedance_upscale;
 
     let res;
     localInputs.auto_ban = localInputs.auto_ban ? 1 : 0;
@@ -2438,6 +2459,50 @@ const EditChannelModal = (props) => {
                     formApi={formApiRef.current}
                     extraText={t('键为原状态码，值为要复写的状态码，仅影响本地判断')}
                   />
+
+                  {inputs.type === 54 && (
+                    <Form.TextArea
+                      field='seedance_upscale'
+                      label='seedance_upscale'
+                      placeholder={`{
+  "doubao-seedance-2-0-260128-g1": {
+    "enabled": true,
+    "map_model": "doubao-seedance-2-0-260128",
+    "groups": ["yihi-default"],
+    "rules": {
+      "720p": {
+        "seedance_resolution": "480p",
+        "upscale_resolution": "720p",
+        "billing_model": "doubao-seedance-2-upscale-720p"
+      }
+    },
+    "upscale": {
+      "provider": "doubao",
+      "api_key": "xxx",
+      "max_retries": 3
+    }
+  }
+}`}
+                      autosize
+                      onChange={(value) =>
+                        handleInputChange('seedance_upscale', value)
+                      }
+                      extraText={
+                        <div className='flex gap-2 flex-wrap items-center'>
+                          <Text type='tertiary' size='small'>
+                            {t('其他设置')}
+                          </Text>
+                          <Text
+                            className='!text-semi-color-primary cursor-pointer'
+                            onClick={() => formatJsonField('seedance_upscale')}
+                          >
+                            {t('格式化')}
+                          </Text>
+                        </div>
+                      }
+                      showClear
+                    />
+                  )}
                 </div>
 
                 {/* Channel Behavior Section */}
