@@ -1835,7 +1835,7 @@ const EditChannelModal = (props) => {
       settings.upstream_model_update_last_check_time = 0;
     }
 
-    if (localInputs.type === 45 && localInputs.seedance_upscale?.trim()) {
+    if (localInputs.type === 54 && localInputs.seedance_upscale?.trim()) {
       try {
         settings.seedance_upscale = JSON.parse(localInputs.seedance_upscale);
       } catch (error) {

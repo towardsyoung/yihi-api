@@ -159,6 +159,17 @@ func TestConfiguredSeedanceUpscalePlan(t *testing.T) {
 							APIKey: "upscale-key-g2",
 						},
 					},
+					"doubao-seedance-2-0-260128-g3": {
+						Enabled:  true,
+						MapModel: "ep-no-upscale",
+						Groups:   []string{"yihi-default"},
+						Rules: map[string]dto.SeedanceUpscaleRuleConfig{
+							"480p": {
+								SeedanceResolution: "480p",
+								BillingModel:       "doubao-seedance-2-upscale-480p",
+							},
+						},
+					},
 				},
 			},
 		},
@@ -171,13 +182,21 @@ func TestConfiguredSeedanceUpscalePlan(t *testing.T) {
 	require.Equal(t, "doubao-seedance-2-upscale-720p", plan.BillingModelName)
 	require.Equal(t, "upscale-key-g1", plan.APIKey)
 	require.Equal(t, "480p", plan.SourceResolution)
+	require.Equal(t, "720p", plan.BillingResolution)
 	require.Equal(t, "720p", plan.TargetResolution)
 	require.Equal(t, 2, plan.MaxRetries)
+	factors, err := seedanceBillingFactors(&requestPayload{
+		Duration:   intValuePtr(6),
+		Resolution: plan.BillingResolution,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2.2, factors["resolution"])
 
 	plan, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g1", "1080p")
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "720p", plan.SourceResolution)
+	require.Equal(t, "720p", plan.BillingResolution)
 	require.Equal(t, "1080p", plan.TargetResolution)
 	require.Equal(t, "doubao-seedance-2-upscale-1080p", plan.BillingModelName)
 
@@ -186,6 +205,17 @@ func TestConfiguredSeedanceUpscalePlan(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "ep-20260508144423-qrvlk", plan.UpstreamModelName)
 	require.Equal(t, "upscale-key-g2", plan.APIKey)
+
+	plan, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g3", "480p")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ep-no-upscale", plan.UpstreamModelName)
+	require.Equal(t, "doubao-seedance-2-upscale-480p", plan.BillingModelName)
+	require.Equal(t, "480p", plan.SourceResolution)
+	require.Equal(t, "480p", plan.BillingResolution)
+	require.Empty(t, plan.TargetResolution)
+	require.Empty(t, plan.APIKey)
+	require.Zero(t, plan.MaxRetries)
 
 	info.TokenGroup = "not-allowed"
 	_, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g1", "720p")
@@ -231,6 +261,15 @@ func TestBuildTaskPrivateDataPatchForSeedanceUpscale(t *testing.T) {
 	require.Equal(t, "480p", patch.Upscale.SourceResolution)
 	require.Equal(t, "720p", patch.Upscale.TargetResolution)
 	require.Equal(t, 2, patch.Upscale.MaxRetries)
+
+	info := &relaycommon.RelayInfo{}
+	applySeedanceUpscalePlan(info, seedanceUpscalePlan{
+		BillingModelName: "doubao-seedance-2-upscale-480p",
+		SourceResolution: "480p",
+	})
+	require.Equal(t, "doubao-seedance-2-upscale-480p", info.BillingModelName)
+	require.Nil(t, info.VideoUpscale)
+	require.Nil(t, adaptor.BuildTaskPrivateDataPatch(info, "seedance-task-id", nil).Upscale)
 }
 
 func TestParseUpscaleTaskResult(t *testing.T) {

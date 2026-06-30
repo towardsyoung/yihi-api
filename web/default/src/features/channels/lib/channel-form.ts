@@ -581,7 +581,7 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     }
   }
 
-  if (formData.type === 45 && formData.seedance_upscale?.trim()) {
+  if (formData.type === 54 && formData.seedance_upscale?.trim()) {
     settingsObj.seedance_upscale = JSON.parse(formData.seedance_upscale)
   } else if ('seedance_upscale' in settingsObj) {
     delete settingsObj.seedance_upscale

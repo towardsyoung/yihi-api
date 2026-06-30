@@ -139,7 +139,7 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	} else if ok {
 		priceModelName = plan.BillingModelName
 		applySeedanceUpscalePlan(info, plan)
-		body.Resolution = plan.SourceResolution
+		body.Resolution = plan.BillingResolution
 	} else if !IsSeedanceFixedPriceModel(modelName) {
 		return nil
 	}
@@ -183,7 +183,7 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 		return nil
 	} else if ok {
 		applySeedanceUpscalePlan(info, plan)
-		body.Resolution = plan.SourceResolution
+		body.Resolution = plan.BillingResolution
 	} else if !IsSeedanceFixedPriceModel(modelName) {
 		return nil
 	}
@@ -280,6 +280,7 @@ type seedanceUpscalePlan struct {
 	BillingModelName  string
 	APIKey            string
 	SourceResolution  string
+	BillingResolution string
 	TargetResolution  string
 	MaxRetries        int
 }
@@ -310,27 +311,38 @@ func resolveConfiguredSeedanceUpscalePlan(info *relaycommon.RelayInfo, modelName
 	if strings.TrimSpace(rule.BillingModel) == "" {
 		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s resolution %s missing billing_model", modelName, normalized)
 	}
-	if strings.TrimSpace(rule.SeedanceResolution) == "" || strings.TrimSpace(rule.UpscaleResolution) == "" {
-		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s resolution %s missing seedance_resolution or upscale_resolution", modelName, normalized)
+	if strings.TrimSpace(rule.SeedanceResolution) == "" {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s resolution %s missing seedance_resolution", modelName, normalized)
 	}
-	if provider := strings.TrimSpace(cfg.Upscale.Provider); provider != "" && !strings.EqualFold(provider, "doubao") {
-		return seedanceUpscalePlan{}, false, fmt.Errorf("unsupported seedance upscale provider %s", provider)
+	targetResolution := strings.ToLower(strings.TrimSpace(rule.UpscaleResolution))
+	sourceResolution := strings.ToLower(strings.TrimSpace(rule.SeedanceResolution))
+	billingResolution := normalized
+	if _, _, ok := NormalizeSeedanceResolution(billingResolution); !ok {
+		billingResolution = sourceResolution
 	}
-	apiKey := strings.TrimSpace(cfg.Upscale.APIKey)
-	if apiKey == "" {
-		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s must configure upscale.api_key", modelName)
-	}
-	maxRetries := cfg.Upscale.MaxRetries
-	if maxRetries <= 0 {
-		maxRetries = seedanceUpscaleDefaultMaxRetries
+	apiKey := ""
+	maxRetries := 0
+	if targetResolution != "" {
+		if provider := strings.TrimSpace(cfg.Upscale.Provider); provider != "" && !strings.EqualFold(provider, "doubao") {
+			return seedanceUpscalePlan{}, false, fmt.Errorf("unsupported seedance upscale provider %s", provider)
+		}
+		apiKey = strings.TrimSpace(cfg.Upscale.APIKey)
+		if apiKey == "" {
+			return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s must configure upscale.api_key", modelName)
+		}
+		maxRetries = cfg.Upscale.MaxRetries
+		if maxRetries <= 0 {
+			maxRetries = seedanceUpscaleDefaultMaxRetries
+		}
 	}
 	return seedanceUpscalePlan{
 		ExternalModelName: modelName,
 		UpstreamModelName: upstreamModel,
 		BillingModelName:  strings.TrimSpace(rule.BillingModel),
 		APIKey:            apiKey,
-		SourceResolution:  strings.ToLower(strings.TrimSpace(rule.SeedanceResolution)),
-		TargetResolution:  strings.ToLower(strings.TrimSpace(rule.UpscaleResolution)),
+		SourceResolution:  sourceResolution,
+		BillingResolution: billingResolution,
+		TargetResolution:  targetResolution,
 		MaxRetries:        maxRetries,
 	}, true, nil
 }
@@ -356,6 +368,10 @@ func seedanceUpscaleGroupAllowed(info *relaycommon.RelayInfo, groups []string) b
 
 func applySeedanceUpscalePlan(info *relaycommon.RelayInfo, plan seedanceUpscalePlan) {
 	info.BillingModelName = plan.BillingModelName
+	if strings.TrimSpace(plan.TargetResolution) == "" {
+		info.VideoUpscale = nil
+		return
+	}
 	info.VideoUpscale = &relaycommon.VideoUpscaleRelayInfo{
 		Enabled:          true,
 		Stage:            seedanceUpscaleStageSeedance,
