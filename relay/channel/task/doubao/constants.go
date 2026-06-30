@@ -33,6 +33,7 @@ var seedanceFixedPriceModels = map[string]bool{
 	"doubao-seedance-2-0-260128":      true,
 	"doubao-seedance-2-0-fast-260128": true,
 	"doubao-seedance-2-0-mini-260615": true,
+	"doubao-seedance-1-5-pro-251215":  true,
 }
 
 func IsSeedanceFixedPriceModel(modelName string) bool {
