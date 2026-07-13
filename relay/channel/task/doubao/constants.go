@@ -15,10 +15,11 @@ var ModelList = []string{
 var ChannelName = "doubao-video"
 
 const (
-	seedanceResolution480pRatio = 1.0
-	seedanceResolution720pRatio = 2.2
-	seedanceNoVideoInputRatio   = 1.0
-	seedanceHasVideoInputRatio  = 1.65
+	seedanceResolution480pRatio  = 1.0
+	seedanceResolution720pRatio  = 1.364
+	seedanceResolution1080pRatio = 3.27
+	seedanceNoVideoInputRatio    = 1.0
+	seedanceHasVideoInputRatio   = 1.65
 
 	seedanceUpscaleStageSeedance     = "seedance"
 	seedanceUpscaleStageUpscale      = "upscale"
@@ -47,6 +48,8 @@ func NormalizeSeedanceResolution(resolution string) (string, float64, bool) {
 		return normalized, seedanceResolution480pRatio, true
 	case "720p":
 		return normalized, seedanceResolution720pRatio, true
+	case "1080p":
+		return normalized, seedanceResolution1080pRatio, true
 	default:
 		return normalized, 0, false
 	}
