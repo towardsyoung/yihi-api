@@ -240,26 +240,29 @@ export function Hero(props: HeroProps) {
         </div>
 
         <div
-          className='landing-animate-fade-up relative flex w-full justify-center opacity-0 lg:col-span-6'
+          className='landing-animate-fade-up relative flex w-full flex-col items-center opacity-0 lg:col-span-6'
           style={{ animationDelay: '260ms' }}
         >
           <div
             aria-hidden
             className='absolute -inset-8 -z-10 rounded-[3rem] bg-blue-500/10 blur-3xl dark:bg-cyan-400/5'
           />
-          <div className='absolute -top-4 -left-2 z-10 hidden items-center gap-2 rounded-full border border-white/10 bg-[#08111f]/90 px-3 py-1.5 font-mono text-[10px] tracking-wider text-white/70 shadow-xl backdrop-blur-md sm:flex'>
-            <span className='size-1.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]' />
-            {t('Secure & Reliable')}
-          </div>
-          <div className='absolute -right-3 -bottom-4 z-10 hidden rounded-xl border border-blue-400/20 bg-[#08111f]/90 px-4 py-3 shadow-xl backdrop-blur-md sm:block'>
-            <div className='font-mono text-[10px] tracking-wider text-cyan-300 uppercase'>
-              {t('Model Access')}
+          <div className='mb-3 flex w-full max-w-2xl flex-wrap items-center justify-between gap-2 px-1'>
+            <div className='flex items-center gap-2 rounded-full border border-white/10 bg-[#08111f] px-3 py-1.5 font-mono text-[10px] tracking-wider text-white/70 shadow-lg'>
+              <span className='size-1.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]' />
+              {t('Secure & Reliable')}
             </div>
-            <div className='mt-1 text-sm font-medium text-white'>
-              OpenAI · Claude · Gemini
+            <div className='flex items-center gap-2 rounded-full border border-blue-400/15 bg-[#08111f] px-3 py-1.5 shadow-lg'>
+              <span className='font-mono text-[10px] tracking-wider text-cyan-300 uppercase'>
+                {t('Model Access')}
+              </span>
+              <span aria-hidden='true' className='h-3 w-px bg-white/15' />
+              <span className='text-[11px] font-medium text-white/80'>
+                OpenAI · Claude · Gemini
+              </span>
             </div>
           </div>
-          <HeroTerminalDemo className='lg:mt-0' />
+          <HeroTerminalDemo />
         </div>
       </div>
     </section>
