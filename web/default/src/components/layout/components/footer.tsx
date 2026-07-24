@@ -44,8 +44,6 @@ interface FooterProps {
 
 const NEW_API_FOOTER_ATTRIBUTION_KEY = [
   'footer',
-  'new' + 'api',
-  'projectAttributionSuffix',
 ].join('.')
 
 function FooterLinkItem(props: { link: FooterLink }) {
