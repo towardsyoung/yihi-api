@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next'
 
 import { AnimateInView } from '@/components/animate-in-view'
 import { Button } from '@/components/ui/button'
+import { useSystemConfig } from '@/hooks/use-system-config'
 
 interface CTAProps {
   className?: string
@@ -30,53 +31,64 @@ interface CTAProps {
 
 export function CTA(props: CTAProps) {
   const { t } = useTranslation()
+  const { systemName, logo } = useSystemConfig()
 
   if (props.isAuthenticated) {
     return null
   }
 
   return (
-    <section className='relative z-10 overflow-hidden px-6 py-24 md:py-32'>
-      {/* Gradient mesh background */}
-      <div
-        aria-hidden
-        className='absolute inset-0 -z-10 opacity-20 dark:opacity-[0.08]'
-        style={{
-          background: [
-            'radial-gradient(ellipse 50% 50% at 30% 50%, oklch(0.7 0.15 250 / 70%) 0%, transparent 70%)',
-            'radial-gradient(ellipse 40% 40% at 70% 40%, oklch(0.65 0.12 200 / 50%) 0%, transparent 70%)',
-          ].join(', '),
-        }}
-      />
-
+    <section className='landing-deferred-section relative z-10 overflow-hidden px-6 py-24 md:py-32'>
       <AnimateInView
-        className='mx-auto max-w-2xl text-center'
+        className='relative mx-auto max-w-7xl overflow-hidden rounded-[2rem] bg-blue-600 px-6 py-16 text-center text-white shadow-[0_32px_90px_-42px_rgba(37,99,235,0.8)] md:px-12 md:py-20 dark:bg-blue-700'
         animation='scale-in'
       >
-        <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-4xl'>
-          {t('Ready to simplify')}
-          <br />
-          <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
-            {t('your AI integration?')}
-          </span>
-        </h2>
-        <p className='text-muted-foreground/80 mx-auto mt-5 max-w-md text-sm leading-relaxed md:text-base'>
-          {t(
-            'Deploy your own gateway and start routing requests through your configured upstream services.'
-          )}
-        </p>
-        <div className='mt-8 flex items-center justify-center gap-3'>
-          <Button className='group rounded-lg' render={<Link to='/sign-up' />}>
-            {t('Get Started')}
-            <ArrowRight className='ml-1 size-3.5 transition-transform duration-200 group-hover:translate-x-0.5' />
-          </Button>
-          <Button
-            variant='outline'
-            className='border-border/50 hover:border-border hover:bg-muted/50 rounded-lg'
-            render={<Link to='/pricing' />}
-          >
-            {t('View Pricing')}
-          </Button>
+        <div
+          aria-hidden
+          className='absolute inset-0 bg-[radial-gradient(circle_at_10%_10%,rgba(255,255,255,0.2),transparent_32%),radial-gradient(circle_at_90%_90%,rgba(34,211,238,0.24),transparent_34%)]'
+        />
+        <div
+          aria-hidden
+          className='absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.08)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.08)_1px,transparent_1px)] [mask-image:radial-gradient(circle_at_center,black,transparent_78%)] bg-[size:3.5rem_3.5rem]'
+        />
+        <div className='relative'>
+          <div className='mb-6 flex items-center justify-center gap-2.5'>
+            <img
+              src={logo}
+              alt=''
+              aria-hidden='true'
+              className='size-8 rounded-lg bg-white/10 object-contain'
+            />
+            <span className='text-sm font-semibold tracking-tight'>
+              {systemName}
+            </span>
+          </div>
+          <h2 className='text-3xl leading-tight font-semibold tracking-[-0.04em] md:text-5xl'>
+            {t('Ready to simplify')}
+            <br />
+            <span className='text-cyan-100'>{t('your AI integration?')}</span>
+          </h2>
+          <p className='mx-auto mt-5 max-w-lg text-sm leading-6 text-blue-100 md:text-base'>
+            {t(
+              'Deploy your own gateway and start routing requests through your configured upstream services.'
+            )}
+          </p>
+          <div className='mt-8 flex flex-wrap items-center justify-center gap-3'>
+            <Button
+              className='group bg-white text-blue-700 hover:bg-blue-50'
+              render={<Link to='/sign-up' />}
+            >
+              {t('Get Started')}
+              <ArrowRight className='ml-1 size-3.5 transition-transform duration-200 group-hover:translate-x-0.5' />
+            </Button>
+            <Button
+              variant='outline'
+              className='border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white'
+              render={<Link to='/pricing' />}
+            >
+              {t('View Pricing')}
+            </Button>
+          </div>
         </div>
       </AnimateInView>
     </section>

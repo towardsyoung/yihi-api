@@ -173,6 +173,10 @@ export const STATIC_I18N_KEYS = [
   'Multi-user management with flexible permission allocation',
   'Technical Support',
   'Professional team providing 24/7 technical support',
+  'Unified AI model service',
+  'One API. Every leading model.',
+  'Leading models, one consistent API',
+  'Choose the right model for every workload without rebuilding your integration.',
 
   // User management (interpolated keys)
   'Remaining Quota ({{currency}})',
