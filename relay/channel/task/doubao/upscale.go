@@ -17,18 +17,22 @@ import (
 type upscaleSubmitRequest struct {
 	VideoURL   string `json:"video_url"`
 	Resolution string `json:"resolution"`
-	Scene      string `json:"scene"`
+}
+
+type upscaleErrorResponse struct {
+	Message string `json:"message"`
 }
 
 type upscaleSubmitResponse struct {
-	Success   bool   `json:"success"`
-	TaskID    string `json:"task_id"`
-	RequestID string `json:"request_id"`
-	Message   string `json:"message,omitempty"`
+	Success   bool                 `json:"success"`
+	TaskID    string               `json:"task_id"`
+	RequestID string               `json:"request_id"`
+	Message   string               `json:"message,omitempty"`
+	Error     upscaleErrorResponse `json:"error"`
 }
 
 type upscaleTaskResponse struct {
-	Success  bool   `json:"success"`
+	Success  *bool  `json:"success"`
 	TaskID   string `json:"task_id"`
 	TaskType string `json:"task_type"`
 	Status   string `json:"status"`
@@ -38,8 +42,9 @@ type upscaleTaskResponse struct {
 		Resolution string  `json:"resolution"`
 		VideoURL   string  `json:"video_url"`
 	} `json:"result"`
-	Message   string `json:"message,omitempty"`
-	RequestID string `json:"request_id"`
+	Message   string               `json:"message,omitempty"`
+	Error     upscaleErrorResponse `json:"error"`
+	RequestID string               `json:"request_id"`
 }
 
 func isSeedanceUpscaleTaskID(taskID string) bool {
@@ -60,21 +65,32 @@ func (a *TaskAdaptor) fetchUpscaleTask(key, taskID, proxy string) (*http.Respons
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		return resp, nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read upscale task error response failed: %w", err)
+	}
+	return nil, fmt.Errorf("upscale task status %d: %s", resp.StatusCode, string(body))
 }
 
 func (a *TaskAdaptor) submitUpscaleTask(key, proxy, videoURL, targetResolution string) (string, []byte, error) {
 	payload := upscaleSubmitRequest{
 		VideoURL:   videoURL,
 		Resolution: targetResolution,
-		Scene:      seedanceUpscaleScene,
 	}
 	data, err := common.Marshal(payload)
 	if err != nil {
 		return "", nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, seedanceUpscaleBaseURL+"/api/v1/tools/enhance-video", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, seedanceUpscaleBaseURL+"/api/v1/tools/enhance-video-generative", bytes.NewReader(data))
 	if err != nil {
 		return "", nil, err
 	}
@@ -105,6 +121,9 @@ func (a *TaskAdaptor) submitUpscaleTask(key, proxy, videoURL, targetResolution s
 		return "", body, fmt.Errorf("unmarshal upscale submit response failed: %w", err)
 	}
 	if !submitResp.Success || submitResp.TaskID == "" {
+		if submitResp.Error.Message != "" {
+			return "", body, fmt.Errorf("upscale submit failed: %s", submitResp.Error.Message)
+		}
 		if submitResp.Message != "" {
 			return "", body, fmt.Errorf("upscale submit failed: %s", submitResp.Message)
 		}
@@ -118,7 +137,7 @@ func parseUpscaleTaskResult(respBody []byte) (*relaycommon.TaskInfo, bool, error
 	if err := common.Unmarshal(respBody, &res); err != nil {
 		return nil, false, nil
 	}
-	if !isSeedanceUpscaleTaskType(res.TaskType) && !isSeedanceUpscaleTaskID(res.TaskID) {
+	if res.Success == nil && !isSeedanceUpscaleTaskType(res.TaskType) && !isSeedanceUpscaleTaskID(res.TaskID) {
 		return nil, false, nil
 	}
 
@@ -126,6 +145,19 @@ func parseUpscaleTaskResult(respBody []byte) (*relaycommon.TaskInfo, bool, error
 		Code:   0,
 		TaskID: res.TaskID,
 	}
+	if res.Success != nil && !*res.Success {
+		taskResult.Status = model.TaskStatusFailure
+		taskResult.Progress = "100%"
+		taskResult.Reason = res.Error.Message
+		if taskResult.Reason == "" {
+			taskResult.Reason = res.Message
+		}
+		if taskResult.Reason == "" {
+			taskResult.Reason = "video upscale request failed"
+		}
+		return &taskResult, true, nil
+	}
+
 	switch strings.ToLower(res.Status) {
 	case "completed", "succeeded", "success":
 		taskResult.Status = model.TaskStatusSuccess
@@ -134,7 +166,10 @@ func parseUpscaleTaskResult(respBody []byte) (*relaycommon.TaskInfo, bool, error
 	case "failed", "fail", "canceled", "cancelled":
 		taskResult.Status = model.TaskStatusFailure
 		taskResult.Progress = "100%"
-		taskResult.Reason = res.Message
+		taskResult.Reason = res.Error.Message
+		if taskResult.Reason == "" {
+			taskResult.Reason = res.Message
+		}
 		if taskResult.Reason == "" {
 			taskResult.Reason = "video upscale failed"
 		}

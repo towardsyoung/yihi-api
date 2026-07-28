@@ -27,7 +27,6 @@ const (
 	seedanceUpscaleDefaultMaxRetries = 3
 	seedanceUpscaleTaskPrefix        = "amk-tool-enhance-video-"
 	seedanceUpscaleBaseURL           = "https://mediakit.cn-beijing.volces.com"
-	seedanceUpscaleScene             = "short_series"
 )
 
 var seedanceFixedPriceModels = map[string]bool{
