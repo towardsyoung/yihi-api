@@ -31,6 +31,8 @@ type TaskSubmitResult struct {
 	//PerCallPrice   types.PriceData
 }
 
+type TaskSubmitPreparedHook func(platform constant.TaskPlatform) error
+
 type taskPrivateDataBuilder interface {
 	BuildTaskPrivateDataPatch(info *relaycommon.RelayInfo, upstreamTaskID string, taskData []byte) model.TaskPrivateData
 }
@@ -147,7 +149,7 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 // 估算计费(EstimateBilling) → 计算价格 → 预扣费（仅首次）→
 // 构建/发送/解析上游请求 → 提交后计费调整(AdjustBillingOnSubmit)。
 // 控制器负责 defer Refund 和成功后 Settle。
-func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitResult, *dto.TaskError) {
+func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo, onPrepared TaskSubmitPreparedHook) (*TaskSubmitResult, *dto.TaskError) {
 	info.InitChannelMeta(c)
 
 	// 1. 确定 platform → 创建适配器 → 验证请求
@@ -216,6 +218,11 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	requestBody, err := adaptor.BuildRequestBody(c, info)
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "build_request_failed", http.StatusInternalServerError)
+	}
+	if onPrepared != nil {
+		if err := onPrepared(platform); err != nil {
+			return nil, service.TaskErrorWrapperLocal(err, "persist_task_before_submit_failed", http.StatusInternalServerError)
+		}
 	}
 
 	// 9. 发送请求

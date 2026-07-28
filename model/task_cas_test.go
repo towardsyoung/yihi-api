@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,6 +87,74 @@ func insertTask(t *testing.T, task *Task) {
 	task.CreatedAt = time.Now().Unix()
 	task.UpdatedAt = time.Now().Unix()
 	require.NoError(t, DB.Create(task).Error)
+}
+
+func TestReserveTaskReplaysSameClientTaskID(t *testing.T) {
+	truncateTables(t)
+
+	firstInfo := &relaycommon.RelayInfo{
+		UserId:        42,
+		UsingGroup:    "default",
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "task_public_first"},
+	}
+	first, created, err := ReserveTask(constant.TaskPlatform("doubao"), firstInfo, "client-task-1", "request-1")
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NotNil(t, first.ClientTaskID)
+	assert.Equal(t, TaskStatus("PREPARING"), first.Status)
+
+	replayInfo := &relaycommon.RelayInfo{
+		UserId:        42,
+		UsingGroup:    "default",
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "task_public_replay"},
+	}
+	replayed, created, err := ReserveTask(constant.TaskPlatform("doubao"), replayInfo, "client-task-1", "request-2")
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, first.ID, replayed.ID)
+	assert.Equal(t, first.TaskID, replayed.TaskID)
+
+	var count int64
+	require.NoError(t, DB.Model(&Task{}).Where("user_id = ? AND client_task_id = ?", 42, "client-task-1").Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+}
+
+func TestReserveTaskReclaimsExpiredSubmissionLease(t *testing.T) {
+	truncateTables(t)
+
+	info := &relaycommon.RelayInfo{
+		UserId:        42,
+		UsingGroup:    "default",
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "task_public_first"},
+	}
+	first, shouldSubmit, err := ReserveTask(constant.TaskPlatform("doubao"), info, "client-task-expired", "request-1")
+	require.NoError(t, err)
+	require.True(t, shouldSubmit)
+	require.NoError(t, DB.Model(&Task{}).Where("id = ?", first.ID).Update("submit_lease_expires_at", time.Now().Unix()-1).Error)
+
+	recoveryInfo := &relaycommon.RelayInfo{
+		UserId:        42,
+		UsingGroup:    "default",
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "task_public_recovery"},
+	}
+	recovered, shouldSubmit, err := ReserveTask(constant.TaskPlatform("doubao"), recoveryInfo, "client-task-expired", "request-2")
+	require.NoError(t, err)
+	require.True(t, shouldSubmit)
+	assert.Equal(t, first.ID, recovered.ID)
+	assert.Equal(t, first.TaskID, recovered.TaskID)
+	assert.Equal(t, "request-2", recovered.SubmitLeaseOwner)
+	assert.Greater(t, recovered.SubmitLeaseExpiresAt, time.Now().Unix())
+}
+
+func TestPreparingTaskIsNotPolled(t *testing.T) {
+	truncateTables(t)
+
+	insertTask(t, &Task{TaskID: "task_preparing", Status: TaskStatusPreparing, Progress: "0%"})
+	insertTask(t, &Task{TaskID: "task_submitted", Status: TaskStatusSubmitted, Progress: "0%"})
+
+	tasks := GetAllUnFinishSyncTasks(10)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "task_submitted", tasks[0].TaskID)
 }
 
 // ---------------------------------------------------------------------------

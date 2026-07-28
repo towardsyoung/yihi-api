@@ -17,7 +17,7 @@ type TaskStatus string
 func (t TaskStatus) ToVideoStatus() string {
 	var status string
 	switch t {
-	case TaskStatusQueued, TaskStatusSubmitted:
+	case TaskStatusNotStart, TaskStatusPreparing, TaskStatusQueued, TaskStatusSubmitted:
 		status = dto.VideoStatusQueued
 	case TaskStatusInProgress:
 		status = dto.VideoStatusInProgress
@@ -32,34 +32,39 @@ func (t TaskStatus) ToVideoStatus() string {
 }
 
 const (
-	TaskStatusNotStart   TaskStatus = "NOT_START"
-	TaskStatusSubmitted             = "SUBMITTED"
-	TaskStatusQueued                = "QUEUED"
-	TaskStatusInProgress            = "IN_PROGRESS"
-	TaskStatusFailure               = "FAILURE"
-	TaskStatusSuccess               = "SUCCESS"
-	TaskStatusUnknown               = "UNKNOWN"
+	TaskStatusNotStart     TaskStatus = "NOT_START"
+	TaskStatusPreparing               = "PREPARING"
+	TaskStatusSubmitted               = "SUBMITTED"
+	TaskStatusQueued                  = "QUEUED"
+	TaskStatusInProgress              = "IN_PROGRESS"
+	TaskStatusFailure                 = "FAILURE"
+	TaskStatusSuccess                 = "SUCCESS"
+	TaskStatusUnknown                 = "UNKNOWN"
+	taskSubmitLeaseSeconds int64      = 180
 )
 
 type Task struct {
-	ID         int64                 `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
-	CreatedAt  int64                 `json:"created_at" gorm:"index"`
-	UpdatedAt  int64                 `json:"updated_at"`
-	TaskID     string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
-	Platform   constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
-	UserId     int                   `json:"user_id" gorm:"index"`
-	Group      string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
-	ChannelId  int                   `json:"channel_id" gorm:"index"`
-	Quota      int                   `json:"quota"`
-	Action     string                `json:"action" gorm:"type:varchar(40);index"` // 任务类型, song, lyrics, description-mode
-	Status     TaskStatus            `json:"status" gorm:"type:varchar(20);index"` // 任务状态
-	FailReason string                `json:"fail_reason"`
-	SubmitTime int64                 `json:"submit_time" gorm:"index"`
-	StartTime  int64                 `json:"start_time" gorm:"index"`
-	FinishTime int64                 `json:"finish_time" gorm:"index"`
-	Progress   string                `json:"progress" gorm:"type:varchar(20);index"`
-	Properties Properties            `json:"properties" gorm:"type:json"`
-	Username   string                `json:"username,omitempty" gorm:"-"`
+	ID                   int64                 `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
+	CreatedAt            int64                 `json:"created_at" gorm:"index"`
+	UpdatedAt            int64                 `json:"updated_at"`
+	TaskID               string                `json:"task_id" gorm:"type:varchar(191);uniqueIndex"` // 第三方id，不一定有/ song id\ Task id
+	ClientTaskID         *string               `json:"client_task_id,omitempty" gorm:"type:varchar(191);uniqueIndex:idx_tasks_user_client_task"`
+	SubmitLeaseOwner     string                `json:"-" gorm:"type:varchar(64);index"`
+	SubmitLeaseExpiresAt int64                 `json:"-" gorm:"index"`
+	Platform             constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
+	UserId               int                   `json:"user_id" gorm:"index;uniqueIndex:idx_tasks_user_client_task"`
+	Group                string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
+	ChannelId            int                   `json:"channel_id" gorm:"index"`
+	Quota                int                   `json:"quota"`
+	Action               string                `json:"action" gorm:"type:varchar(40);index"` // 任务类型, song, lyrics, description-mode
+	Status               TaskStatus            `json:"status" gorm:"type:varchar(20);index"` // 任务状态
+	FailReason           string                `json:"fail_reason"`
+	SubmitTime           int64                 `json:"submit_time" gorm:"index"`
+	StartTime            int64                 `json:"start_time" gorm:"index"`
+	FinishTime           int64                 `json:"finish_time" gorm:"index"`
+	Progress             string                `json:"progress" gorm:"type:varchar(20);index"`
+	Properties           Properties            `json:"properties" gorm:"type:json"`
+	Username             string                `json:"username,omitempty" gorm:"-"`
 	// 禁止返回给用户，内部可能包含key等隐私信息
 	PrivateData TaskPrivateData `json:"-" gorm:"column:private_data;type:json"`
 	Data        json.RawMessage `json:"data" gorm:"type:json"`
@@ -190,7 +195,9 @@ type SyncTaskQueryParams struct {
 func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) *Task {
 	properties := Properties{}
 	privateData := TaskPrivateData{}
+	channelID := 0
 	if relayInfo != nil && relayInfo.ChannelMeta != nil {
+		channelID = relayInfo.ChannelMeta.ChannelId
 		if relayInfo.ChannelMeta.ChannelType == constant.ChannelTypeGemini ||
 			relayInfo.ChannelMeta.ChannelType == constant.ChannelTypeVertexAi {
 			privateData.Key = relayInfo.ChannelMeta.ApiKey
@@ -218,7 +225,7 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 		SubmitTime:  time.Now().Unix(),
 		Status:      TaskStatusNotStart,
 		Progress:    "0%",
-		ChannelId:   relayInfo.ChannelId,
+		ChannelId:   channelID,
 		Platform:    platform,
 		Properties:  properties,
 		PrivateData: privateData,
@@ -325,7 +332,11 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 	var tasks []*Task
 	var err error
 	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Limit(limit).Order("id").Find(&tasks).Error
+	err = DB.Where("progress != ?", "100%").
+		Where("status NOT IN ?", []TaskStatus{TaskStatusPreparing, TaskStatusFailure, TaskStatusSuccess}).
+		Limit(limit).
+		Order("id").
+		Find(&tasks).Error
 	if err != nil {
 		return nil
 	}
@@ -340,8 +351,7 @@ func HasUnfinishedSyncTasks() bool {
 	var id int64
 	err := DB.Model(&Task{}).
 		Where("progress != ?", "100%").
-		Where("status != ?", TaskStatusFailure).
-		Where("status != ?", TaskStatusSuccess).
+		Where("status NOT IN ?", []TaskStatus{TaskStatusFailure, TaskStatusSuccess}).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0
@@ -374,6 +384,66 @@ func GetByTaskId(userId int, taskId string) (*Task, bool, error) {
 		return nil, false, err
 	}
 	return task, exist, err
+}
+
+func GetByClientTaskId(userId int, clientTaskId string) (*Task, bool, error) {
+	if clientTaskId == "" {
+		return nil, false, nil
+	}
+	var task *Task
+	err := DB.Where("user_id = ? and client_task_id = ?", userId, clientTaskId).
+		First(&task).Error
+	exist, err := RecordExist(err)
+	if err != nil {
+		return nil, false, err
+	}
+	return task, exist, nil
+}
+
+// ReserveTask creates the durable local task row before an upstream submission.
+// The returned bool is true only when the caller owns the submission lease.
+func ReserveTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo, clientTaskId string, leaseOwner string) (*Task, bool, error) {
+	now := time.Now().Unix()
+	task := InitTask(platform, relayInfo)
+	task.Status = TaskStatusPreparing
+	task.SubmitLeaseOwner = leaseOwner
+	task.SubmitLeaseExpiresAt = now + taskSubmitLeaseSeconds
+	if clientTaskId != "" {
+		task.ClientTaskID = &clientTaskId
+	}
+	insertErr := task.Insert()
+	if insertErr == nil {
+		return task, true, nil
+	} else if clientTaskId == "" {
+		return nil, false, insertErr
+	}
+
+	existing, exist, getErr := GetByClientTaskId(relayInfo.UserId, clientTaskId)
+	if getErr != nil {
+		return nil, false, getErr
+	}
+	if exist {
+		if existing.Status == TaskStatusPreparing && existing.SubmitLeaseExpiresAt <= now {
+			result := DB.Model(&Task{}).
+				Where("id = ? AND status = ? AND submit_lease_expires_at <= ?", existing.ID, TaskStatusPreparing, now).
+				Updates(map[string]any{
+					"submit_lease_owner":      leaseOwner,
+					"submit_lease_expires_at": now + taskSubmitLeaseSeconds,
+					"updated_at":              now,
+				})
+			if result.Error != nil {
+				return nil, false, result.Error
+			}
+			if result.RowsAffected == 1 {
+				existing.SubmitLeaseOwner = leaseOwner
+				existing.SubmitLeaseExpiresAt = now + taskSubmitLeaseSeconds
+				existing.UpdatedAt = now
+				return existing, true, nil
+			}
+		}
+		return existing, false, nil
+	}
+	return nil, false, insertErr
 }
 
 func GetByTaskIds(userId int, taskIds []any) ([]*Task, error) {
@@ -546,6 +616,7 @@ func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
 func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
 	openAIVideo := dto.NewOpenAIVideo()
 	openAIVideo.ID = t.TaskID
+	openAIVideo.TaskID = t.TaskID
 	openAIVideo.Status = t.Status.ToVideoStatus()
 	openAIVideo.Model = t.Properties.OriginModelName
 	openAIVideo.SetProgressStr(t.Progress)

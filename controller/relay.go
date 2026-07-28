@@ -483,6 +483,24 @@ func RelayTaskFetch(c *gin.Context) {
 	}
 }
 
+func RelayTaskFetchByClientTaskID(c *gin.Context) {
+	clientTaskID := strings.TrimSpace(c.Param("client_task_id"))
+	if clientTaskID == "" || len(clientTaskID) > 191 {
+		respondTaskError(c, service.TaskErrorWrapperLocal(errors.New("invalid client task id"), "invalid_client_task_id", http.StatusBadRequest))
+		return
+	}
+	task, exist, err := model.GetByClientTaskId(c.GetInt("id"), clientTaskID)
+	if err != nil {
+		respondTaskError(c, service.TaskErrorWrapper(err, "get_task_failed", http.StatusInternalServerError))
+		return
+	}
+	if !exist {
+		respondTaskError(c, service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusNotFound))
+		return
+	}
+	c.JSON(http.StatusOK, task.ToOpenAIVideo())
+}
+
 func RelayTask(c *gin.Context) {
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
@@ -494,16 +512,57 @@ func RelayTask(c *gin.Context) {
 		return
 	}
 
+	clientTaskID := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if len(clientTaskID) > 191 {
+		respondTaskError(c, service.TaskErrorWrapperLocal(errors.New("Idempotency-Key is too long"), "invalid_idempotency_key", http.StatusBadRequest))
+		return
+	}
+	if clientTaskID != "" {
+		relayInfo.RequestId = fmt.Sprintf("%x", common.Sha256Raw([]byte(fmt.Sprintf("%d:%s", relayInfo.UserId, clientTaskID))))
+	}
+
 	if taskErr := relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
 		respondTaskError(c, taskErr)
+		return
+	}
+
+	if relayInfo.PublicTaskID == "" {
+		relayInfo.PublicTaskID = model.GenerateTaskID()
+	}
+	leaseOwner := c.GetString(common.RequestIdKey)
+	if leaseOwner == "" {
+		leaseOwner = model.GenerateTaskID()
+	}
+	reservedTask, shouldSubmit, reserveErr := model.ReserveTask("", relayInfo, clientTaskID, leaseOwner)
+	if reserveErr != nil {
+		respondTaskError(c, service.TaskErrorWrapper(reserveErr, "reserve_task_failed", http.StatusInternalServerError))
+		return
+	}
+	// Reclaimed PREPARING tasks must keep the original public task ID so the
+	// same idempotency key always resolves to one stable business task.
+	relayInfo.PublicTaskID = reservedTask.TaskID
+	if !shouldSubmit {
+		c.Header("Idempotency-Replayed", "true")
+		c.JSON(http.StatusOK, reservedTask.ToOpenAIVideo())
 		return
 	}
 
 	var result *relay.TaskSubmitResult
 	var taskErr *dto.TaskError
 	defer func() {
-		if taskErr != nil && relayInfo.Billing != nil {
-			relayInfo.Billing.Refund(c)
+		if taskErr != nil {
+			reservedTask.Status = model.TaskStatusFailure
+			reservedTask.Progress = "100%"
+			reservedTask.FinishTime = time.Now().Unix()
+			reservedTask.FailReason = taskErr.Message
+			reservedTask.SubmitLeaseOwner = ""
+			reservedTask.SubmitLeaseExpiresAt = 0
+			if updateErr := reservedTask.Update(); updateErr != nil {
+				common.SysError("update failed reserved task error: " + updateErr.Error())
+			}
+			if relayInfo.Billing != nil {
+				relayInfo.Billing.Refund(c)
+			}
 		}
 	}()
 
@@ -548,7 +607,37 @@ func RelayTask(c *gin.Context) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
-		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
+		result, taskErr = relay.RelayTaskSubmit(c, relayInfo, func(platform constant.TaskPlatform) error {
+			preparedTask := model.InitTask(platform, relayInfo)
+			preparedTask.ID = reservedTask.ID
+			preparedTask.CreatedAt = reservedTask.CreatedAt
+			preparedTask.UpdatedAt = reservedTask.UpdatedAt
+			preparedTask.SubmitTime = reservedTask.SubmitTime
+			preparedTask.ClientTaskID = reservedTask.ClientTaskID
+			preparedTask.SubmitLeaseOwner = reservedTask.SubmitLeaseOwner
+			preparedTask.SubmitLeaseExpiresAt = reservedTask.SubmitLeaseExpiresAt
+			preparedTask.Status = model.TaskStatusPreparing
+			preparedTask.Action = relayInfo.Action
+			preparedTask.Quota = relayInfo.PriceData.Quota
+			preparedTask.PrivateData.BillingSource = relayInfo.BillingSource
+			preparedTask.PrivateData.SubscriptionId = relayInfo.SubscriptionId
+			preparedTask.PrivateData.TokenId = relayInfo.TokenId
+			preparedTask.PrivateData.NodeName = common.NodeName
+			preparedTask.PrivateData.BillingContext = &model.TaskBillingContext{
+				ModelPrice:       relayInfo.PriceData.ModelPrice,
+				GroupRatio:       relayInfo.PriceData.GroupRatioInfo.GroupRatio,
+				ModelRatio:       relayInfo.PriceData.ModelRatio,
+				OtherRatios:      relayInfo.PriceData.OtherRatios(),
+				OriginModelName:  relayInfo.OriginModelName,
+				BillingModelName: relayInfo.BillingModelName,
+				PerCallBilling:   common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
+			}
+			if updateErr := preparedTask.Update(); updateErr != nil {
+				return updateErr
+			}
+			reservedTask = preparedTask
+			return nil
+		})
 		if taskErr == nil {
 			break
 		}
@@ -579,6 +668,14 @@ func RelayTask(c *gin.Context) {
 		service.LogTaskConsumption(c, relayInfo)
 
 		task := model.InitTask(result.Platform, relayInfo)
+		task.ID = reservedTask.ID
+		task.CreatedAt = reservedTask.CreatedAt
+		task.UpdatedAt = reservedTask.UpdatedAt
+		task.SubmitTime = reservedTask.SubmitTime
+		task.ClientTaskID = reservedTask.ClientTaskID
+		task.SubmitLeaseOwner = ""
+		task.SubmitLeaseExpiresAt = 0
+		task.Status = model.TaskStatusSubmitted
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
@@ -599,8 +696,8 @@ func RelayTask(c *gin.Context) {
 		task.Quota = result.Quota
 		task.Data = result.TaskData
 		task.Action = relayInfo.Action
-		if insertErr := task.Insert(); insertErr != nil {
-			common.SysError("insert task error: " + insertErr.Error())
+		if updateErr := task.Update(); updateErr != nil {
+			common.SysError("update submitted task error: " + updateErr.Error())
 		}
 	}
 
