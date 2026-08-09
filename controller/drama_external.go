@@ -221,14 +221,25 @@ func addDramaTokenQuota(tokenId int, delta int, reason string, uniqueId string, 
 			if existingLog.Quota != delta {
 				return fmt.Errorf("unique_id already used with different delta")
 			}
+			if token.Status == common.TokenStatusExhausted && (token.UnlimitedQuota || token.RemainQuota > 0) {
+				if err := tx.Model(&token).Update("status", common.TokenStatusEnabled).Error; err != nil {
+					return err
+				}
+				token.Status = common.TokenStatusEnabled
+			}
 			result = dramaTokenQuotaAddResponse(&token, delta, true)
 			return nil
 		}
 
-		if err := tx.Model(&model.Token{}).Where("id = ?", token.Id).Updates(map[string]interface{}{
+		updates := map[string]interface{}{
 			"remain_quota":  gorm.Expr("remain_quota + ?", delta),
 			"accessed_time": common.GetTimestamp(),
-		}).Error; err != nil {
+		}
+		if token.Status == common.TokenStatusExhausted && (token.UnlimitedQuota || token.RemainQuota > -delta) {
+			updates["status"] = common.TokenStatusEnabled
+			token.Status = common.TokenStatusEnabled
+		}
+		if err := tx.Model(&model.Token{}).Where("id = ?", token.Id).Updates(updates).Error; err != nil {
 			return err
 		}
 		token.RemainQuota += delta

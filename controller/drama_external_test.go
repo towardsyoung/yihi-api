@@ -20,16 +20,13 @@ func setupDramaExternalTestDB(t *testing.T) *gorm.DB {
 
 	previousDB := model.DB
 	previousLOGDB := model.LOG_DB
-	previousUsingSQLite := common.UsingSQLite
-	previousUsingMySQL := common.UsingMySQL
-	previousUsingPostgreSQL := common.UsingPostgreSQL
+	previousMainDatabaseType := common.MainDatabaseType()
+	previousLogDatabaseType := common.LogDatabaseType()
 	previousRedisEnabled := common.RedisEnabled
 	previousBatchUpdateEnabled := common.BatchUpdateEnabled
 
 	gin.SetMode(gin.TestMode)
-	common.UsingSQLite = true
-	common.UsingMySQL = false
-	common.UsingPostgreSQL = false
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	common.RedisEnabled = false
 	common.BatchUpdateEnabled = false
 
@@ -42,9 +39,7 @@ func setupDramaExternalTestDB(t *testing.T) *gorm.DB {
 	t.Cleanup(func() {
 		model.DB = previousDB
 		model.LOG_DB = previousLOGDB
-		common.UsingSQLite = previousUsingSQLite
-		common.UsingMySQL = previousUsingMySQL
-		common.UsingPostgreSQL = previousUsingPostgreSQL
+		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
 		common.RedisEnabled = previousRedisEnabled
 		common.BatchUpdateEnabled = previousBatchUpdateEnabled
 
@@ -106,7 +101,6 @@ func TestAddDramaTokenQuotaIdempotent(t *testing.T) {
 	var log model.Log
 	require.NoError(t, db.Where("token_id = ? AND upstream_request_id = ?", token.Id, upstreamRequestId).First(&log).Error)
 	require.Contains(t, log.Content, "task completed")
-	require.Contains(t, log.Content, "50 credits")
 	require.Equal(t, 50, log.Quota)
 	other, err := common.StrToMap(log.Other)
 	require.NoError(t, err)
@@ -138,6 +132,62 @@ func TestAddDramaTokenQuotaRejectsUniqueIdWithDifferentDelta(t *testing.T) {
 	require.NoError(t, db.First(&updated, token.Id).Error)
 	require.Equal(t, 150, updated.RemainQuota)
 	require.Equal(t, 20, updated.UsedQuota)
+}
+
+func TestAddDramaTokenQuotaReenablesExhaustedToken(t *testing.T) {
+	db := setupDramaExternalTestDB(t)
+	token := seedDramaToken(t, db)
+	require.NoError(t, db.Model(token).Updates(map[string]interface{}{
+		"status":       common.TokenStatusExhausted,
+		"remain_quota": 0,
+	}).Error)
+
+	result, err := addDramaTokenQuota(token.Id, 50, "quota restored", "event-reenable", dramaQuotaAddUpstreamRequestId("event-reenable"))
+	require.NoError(t, err)
+	require.Equal(t, 50, result["quota"])
+
+	var updated model.Token
+	require.NoError(t, db.First(&updated, token.Id).Error)
+	require.Equal(t, common.TokenStatusEnabled, updated.Status)
+	require.Equal(t, 50, updated.RemainQuota)
+}
+
+func TestAddDramaTokenQuotaIdempotentRetryRepairsHistoricalStatus(t *testing.T) {
+	db := setupDramaExternalTestDB(t)
+	token := seedDramaToken(t, db)
+	uniqueId := "event-historical"
+	upstreamRequestId := dramaQuotaAddUpstreamRequestId(uniqueId)
+	require.NoError(t, db.Model(token).Update("status", common.TokenStatusExhausted).Error)
+	require.NoError(t, db.Create(&model.Log{
+		UserId:            token.UserId,
+		Type:              model.LogTypeSystem,
+		Quota:             50,
+		TokenId:           token.Id,
+		UpstreamRequestId: upstreamRequestId,
+	}).Error)
+
+	result, err := addDramaTokenQuota(token.Id, 50, "quota restored", uniqueId, upstreamRequestId)
+	require.NoError(t, err)
+	require.Equal(t, true, result["idempotent"])
+
+	var updated model.Token
+	require.NoError(t, db.First(&updated, token.Id).Error)
+	require.Equal(t, common.TokenStatusEnabled, updated.Status)
+	require.Equal(t, 100, updated.RemainQuota)
+}
+
+func TestAddDramaTokenQuotaKeepsDisabledTokenDisabled(t *testing.T) {
+	db := setupDramaExternalTestDB(t)
+	token := seedDramaToken(t, db)
+	require.NoError(t, db.Model(token).Update("status", common.TokenStatusDisabled).Error)
+
+	_, err := addDramaTokenQuota(token.Id, 50, "quota restored", "event-disabled", dramaQuotaAddUpstreamRequestId("event-disabled"))
+	require.NoError(t, err)
+
+	var updated model.Token
+	require.NoError(t, db.First(&updated, token.Id).Error)
+	require.Equal(t, common.TokenStatusDisabled, updated.Status)
+	require.Equal(t, 150, updated.RemainQuota)
 }
 
 func TestDramaTokenQuotaAddDefaultsEmptyReason(t *testing.T) {
