@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,7 +40,7 @@ func TestSeedanceBillingFactors(t *testing.T) {
 			},
 			want: map[string]float64{
 				"seconds":     10,
-				"resolution":  2.2,
+				"resolution":  1.364,
 				"video_input": 1.65,
 			},
 		},
@@ -48,10 +48,10 @@ func TestSeedanceBillingFactors(t *testing.T) {
 			name: "rejects unsupported resolution",
 			body: &requestPayload{
 				Duration:   intValuePtr(10),
-				Resolution: "1080p",
+				Resolution: "1440p",
 			},
 			wantErr:    true,
-			errMessage: "seedance resolution must be 480p or 720p",
+			errMessage: "seedance resolution must be 480p, 720p, or 1080p",
 		},
 		{
 			name: "rejects non-positive explicit duration",
@@ -101,7 +101,7 @@ func TestConvertToRequestPayloadUsesTopLevelDurationForSeedanceBilling(t *testin
 	require.NoError(t, err)
 	require.Equal(t, map[string]float64{
 		"seconds":     10,
-		"resolution":  2.2,
+		"resolution":  1.364,
 		"video_input": 1.65,
 	}, got)
 }
@@ -109,12 +109,12 @@ func TestConvertToRequestPayloadUsesTopLevelDurationForSeedanceBilling(t *testin
 func TestSeedanceHelpers(t *testing.T) {
 	require.True(t, IsSeedanceFixedPriceModel("doubao-seedance-2-0-260128"))
 	require.True(t, IsSeedanceFixedPriceModel("doubao-seedance-2-0-fast-260128"))
-	require.False(t, IsSeedanceFixedPriceModel("doubao-seedance-1-5-pro-251215"))
+	require.True(t, IsSeedanceFixedPriceModel("doubao-seedance-1-5-pro-251215"))
 
 	resolution, ratio, ok := NormalizeSeedanceResolution(" 720P ")
 	require.True(t, ok)
 	require.Equal(t, "720p", resolution)
-	require.Equal(t, 2.2, ratio)
+	require.Equal(t, 1.364, ratio)
 }
 
 func TestConfiguredSeedanceUpscalePlan(t *testing.T) {
@@ -191,13 +191,13 @@ func TestConfiguredSeedanceUpscalePlan(t *testing.T) {
 		Resolution: plan.BillingResolution,
 	})
 	require.NoError(t, err)
-	require.Equal(t, 2.2, factors["resolution"])
+	require.Equal(t, 1.364, factors["resolution"])
 
 	plan, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g1", "1080p")
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "720p", plan.SourceResolution)
-	require.Equal(t, "720p", plan.BillingResolution)
+	require.Equal(t, "1080p", plan.BillingResolution)
 	require.Equal(t, "1080p", plan.TargetResolution)
 	require.Equal(t, "doubao-seedance-2-upscale-1080p", plan.BillingModelName)
 

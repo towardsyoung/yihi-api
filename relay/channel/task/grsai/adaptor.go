@@ -8,14 +8,14 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
@@ -94,8 +94,8 @@ func buildGenerateRequest(req *relaycommon.TaskSubmitReq, upstreamModel string) 
 	}, nil
 }
 
-func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
-	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate); taskErr != nil {
+func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) *taskdto.TaskError {
+	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionImageToVideo); taskErr != nil {
 		return taskErr
 	}
 	req, err := relaycommon.GetTaskRequest(c)
@@ -178,29 +178,25 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, bod
 	return channel.DoTaskApiRequest(a, c, info, body)
 }
 
-func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (string, []byte, *dto.TaskError) {
+func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*channel.TaskSubmitResponse, *taskdto.TaskError) {
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", nil, service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
+		return nil, service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 	}
 	_ = resp.Body.Close()
 	task := taskResponse{}
 	if err := common.Unmarshal(data, &task); err != nil {
-		return "", nil, service.TaskErrorWrapper(err, "invalid_response", http.StatusBadGateway)
+		return nil, service.TaskErrorWrapper(err, "invalid_response", http.StatusBadGateway)
 	}
 	if task.Status == "failed" || task.Status == "violation" || task.ID == "" {
-		return "", nil, service.TaskErrorWrapperLocal(fmt.Errorf("Grsai H3 submit failed: %s", task.Error), "upstream_error", http.StatusBadGateway)
+		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("Grsai H3 submit failed: %s", task.Error), "upstream_error", http.StatusBadGateway)
 	}
-	video := dto.NewOpenAIVideo()
-	video.ID, video.TaskID, video.Model = info.PublicTaskID, info.PublicTaskID, info.OriginModelName
-	video.CreatedAt = time.Now().Unix()
-	c.JSON(http.StatusOK, video)
-	return task.ID, data, nil
+	return &channel.TaskSubmitResponse{UpstreamTaskID: task.ID, TaskData: data}, nil
 }
 
-func (a *TaskAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy string) (*http.Response, error) {
-	taskID, ok := body["task_id"].(string)
-	if !ok || taskID == "" {
+func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy string) (*http.Response, error) {
+	taskID := task.GetUpstreamTaskID()
+	if taskID == "" {
 		return nil, fmt.Errorf("missing task ID")
 	}
 	endpoint := grsaiBaseURL(baseURL) + "/api/result?id=" + url.QueryEscape(taskID)
@@ -216,7 +212,7 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy 
 	return client.Do(req)
 }
 
-func (a *TaskAdaptor) ParseTaskResult(data []byte) (*relaycommon.TaskInfo, error) {
+func (a *TaskAdaptor) ParseTaskResult(_ *model.Task, _ *http.Response, data []byte) (*relaycommon.TaskInfo, error) {
 	task := taskResponse{}
 	if err := common.Unmarshal(data, &task); err != nil {
 		return nil, err

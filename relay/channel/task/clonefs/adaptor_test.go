@@ -87,7 +87,7 @@ func TestTaskIDAndResultParsing(t *testing.T) {
 	}.taskID())
 
 	adaptor := &TaskAdaptor{}
-	result, err := adaptor.ParseTaskResult([]byte(`{
+	result, err := adaptor.ParseTaskResult(nil, nil, []byte(`{
 		"status":"completed",
 		"data":{"video_url":"https://cdn.example.com/video.mp4"}
 	}`))
@@ -95,7 +95,7 @@ func TestTaskIDAndResultParsing(t *testing.T) {
 	require.Equal(t, string(model.TaskStatusSuccess), result.Status)
 	require.Equal(t, "https://cdn.example.com/video.mp4", result.Url)
 
-	result, err = adaptor.ParseTaskResult([]byte(`{
+	result, err = adaptor.ParseTaskResult(nil, nil, []byte(`{
 		"state":"failed",
 		"error":"upstream failed"
 	}`))
