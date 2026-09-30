@@ -80,6 +80,9 @@ func init() {
 			OwnedBy: minimax.ChannelName,
 		})
 	}
+	openAIModels = append(openAIModels, dto.OpenAIModels{
+		Id: "minimax-h3", Object: "model", Created: 1626777600, OwnedBy: "Grsai",
+	})
 	for modelName, _ := range constant.MidjourneyModel2Action {
 		openAIModels = append(openAIModels, dto.OpenAIModels{
 			Id:      modelName,
@@ -93,6 +96,7 @@ func init() {
 		openAIModelsMap[aiModel.Id] = aiModel
 	}
 	channelId2Models = make(map[int][]string)
+	channelId2Models[constant.ChannelTypeGrsai] = []string{"minimax-h3"}
 	for i := 1; i <= constant.ChannelTypeDummy; i++ {
 		apiType, success := common.ChannelType2APIType(i)
 		if !success || apiType == constant.APITypeAIProxyLibrary {

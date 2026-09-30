@@ -37,6 +37,7 @@ import (
 	taskclonefs "github.com/QuantumNous/new-api/relay/channel/task/clonefs"
 	taskdoubao "github.com/QuantumNous/new-api/relay/channel/task/doubao"
 	taskGemini "github.com/QuantumNous/new-api/relay/channel/task/gemini"
+	taskgrsai "github.com/QuantumNous/new-api/relay/channel/task/grsai"
 	"github.com/QuantumNous/new-api/relay/channel/task/hailuo"
 	taskjimeng "github.com/QuantumNous/new-api/relay/channel/task/jimeng"
 	"github.com/QuantumNous/new-api/relay/channel/task/kling"
@@ -180,6 +181,8 @@ func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
 			return &taskGemini.TaskAdaptor{}
 		case constant.ChannelTypeMiniMax:
 			return &hailuo.TaskAdaptor{}
+		case constant.ChannelTypeGrsai:
+			return &taskgrsai.TaskAdaptor{}
 		}
 	}
 	return nil
