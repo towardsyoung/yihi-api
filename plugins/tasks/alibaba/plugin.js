@@ -219,14 +219,16 @@ export const meta = {
   name: "Alibaba Bailian",
   icon: "Bailian.Color",
   description: {
-    en: "Alibaba Cloud Bailian image and video generation (Wan, Qwen-Image, Z-Image)",
-    zh: "阿里云百炼图片与视频生成（万相、千问图像、Z-Image）",
+    en: "Alibaba Cloud Bailian image, video, speech generation and lip sync",
+    zh: "阿里云百炼图片、视频、配音生成与对口型",
   },
-  version: "1.4.1",
+  version: "1.5.0",
   author: { name: "QuantumNous" },
   channelTypes: [17],
   // Literal metadata also supports the dashboard's static script preview.
   models: [
+    "qwen-audio-3.1-tts-next",
+    "pixverse/pixverse-lipsync",
     "wan3.0-video",
     "wan3.0-video-prime",
     "wan2.7-t2v",
@@ -280,6 +282,8 @@ export const meta = {
   requiredCapabilities: ["json-clone@1", "submit-sse-delta@1"],
   usageSchema: { ...WAN_IMAGE_USAGE_SCHEMA, ...wanVideoUsageSchema(WAN_VIDEO_RESOLUTIONS, false) },
   usageProfiles: [
+    { models: ["qwen-audio-3.1-tts-next"], schema: { seconds: { type: "number", unit: "second", description: { en: "Speech generation unit price", zh: "配音生成单价" } } } },
+    { models: ["pixverse/pixverse-lipsync"], schema: { seconds: { type: "number", unit: "second", description: { en: "Lip sync unit price", zh: "对口型单价" } } } },
     {
       models: Object.keys(IMAGE_MODELS)
         .concat(IMAGE_MODEL_SNAPSHOTS)
@@ -290,6 +294,7 @@ export const meta = {
     { models: QWEN_IMAGE3_MODELS, schema: QWEN_IMAGE3_USAGE_SCHEMA },
   ].concat(wanVideoUsageProfiles()),
   routes: [
+    { method: "POST", path: "/ali/api/v1/services/audio/tts/SpeechSynthesizer", type: "submit", models: ["qwen-audio-3.1-tts-next"], decode: "createSpeechTask", render: "speechCreated" },
     // Synchronous vendor call with no task to re-query; the response is
     // delivered once and never persisted.
     {
@@ -330,7 +335,7 @@ export const meta = {
     { method: "GET", path: "/ali/api/v1/tasks/:task_id", type: "query", render: "taskStatus" },
   ],
   protocols: [
-    { name: "openai_responses", supports: ["stream", "sync", "background"] },
+    { name: "openai_responses", supports: ["stream", "sync", "background"], models: Object.keys(WAN_MODELS).concat(WAN_VIDEO_SNAPSHOTS, Object.keys(IMAGE_MODELS), IMAGE_MODEL_SNAPSHOTS) },
     { name: "openai_video", models: Object.keys(WAN_MODELS).concat(["wan2.7-t2v-2026-04-25", "wan2.7-t2v-2026-06-12", "wan2.7-i2v-2026-04-25"]) },
     { name: "openai_image", models: Object.keys(IMAGE_MODELS).concat(IMAGE_MODEL_SNAPSHOTS) },
   ],
@@ -389,6 +394,41 @@ function modelProfile(model) {
   const key = modelKey(model);
   if (!Object.prototype.hasOwnProperty.call(WAN_MODELS, key)) throw new Error("unsupported Wan model: " + model);
   return WAN_MODELS[key];
+}
+
+function speechModel(ctx) { return (ctx.upstreamModel || ctx.model) === "qwen-audio-3.1-tts-next"; }
+function lipSyncModel(ctx) { return (ctx.upstreamModel || ctx.model) === "pixverse/pixverse-lipsync"; }
+
+function speechInput(ctx) {
+  const input = objectValue((ctx.requestBody || {}).input, "input");
+  if (typeof input.text_prompt !== "string" || !input.text_prompt.trim() || Array.from(input.text_prompt).length > 3000)
+    throw new Error("text_prompt must contain 1–3000 characters");
+  if (input.rate !== undefined && (typeof input.rate !== "number" || !Number.isFinite(input.rate) || input.rate < 0.5 || input.rate > 2))
+    throw new Error("rate must be between 0.5 and 2");
+  if (input.format !== undefined && !["wav", "mp3", "pcm"].includes(input.format)) throw new Error("invalid speech format");
+  if (input.references !== undefined) {
+    if (!Array.isArray(input.references) || input.references.length > 3) throw new Error("at most 3 reference audio files are supported");
+    for (const reference of input.references) {
+      if (!reference || !!reference.audio_url === !!reference.audio_data) throw new Error("reference must contain audio_url or audio_data exclusively");
+      if (reference.audio_data && (typeof reference.audio_data !== "string" || reference.audio_data.length > 14 * 1024 * 1024 || !/^data:audio\/[\w.+-]+;base64,/.test(reference.audio_data)))
+        throw new Error("invalid or oversized reference audio data");
+      if (reference.audio_url && !/^https:\/\//.test(reference.audio_url)) throw new Error("reference audio URL must use HTTPS");
+    }
+  }
+  return input;
+}
+
+function lipSyncBody(ctx) {
+  const request = ctx.requestBody || {};
+  const metadata = objectValue(request.metadata, "metadata");
+  const input = objectValue(metadata.input, "input");
+  const media = input.media;
+  if (!Array.isArray(media) || media.length !== 2 || media.filter(part => part.type === "video_url").length !== 1 || media.filter(part => part.type === "audio_url").length !== 1)
+    throw new Error("lip sync requires one video_url and one audio_url");
+  for (const part of media) if (typeof part.url !== "string" || !/^https:\/\//.test(part.url)) throw new Error("media URL must use HTTPS");
+  const parameters = objectValue(metadata.parameters, "parameters");
+  if (parameters.watermark !== undefined && typeof parameters.watermark !== "boolean") throw new Error("watermark must be a boolean");
+  return { model: ctx.upstreamModel || ctx.model, input: { media: media }, parameters: { watermark: parameters.watermark ?? false } };
 }
 
 function imageModel(ctx) {
@@ -973,6 +1013,16 @@ function responsesOutputText(ctx, task) {
 }
 
 export function buildSubmitRequest(ctx) {
+  if (speechModel(ctx)) return {
+    url: apiRoot(ctx) + "/api/v1/services/audio/tts/SpeechSynthesizer", method: "POST",
+    headers: { Authorization: "Bearer " + ctx.apiKey, "Content-Type": "application/json", ...(viaNewAPI(ctx) ? { "Idempotency-Key": ctx.publicTaskId } : {}) },
+    body: { model: ctx.upstreamModel || ctx.model, input: speechInput(ctx) }, action: "speech_generation",
+  };
+  if (lipSyncModel(ctx)) return {
+    url: apiRoot(ctx) + "/api/v1/services/aigc/video-generation/video-synthesis", method: "POST",
+    headers: { Authorization: "Bearer " + ctx.apiKey, "Content-Type": "application/json", "X-DashScope-Async": "enable", ...(viaNewAPI(ctx) ? { "Idempotency-Key": ctx.publicTaskId } : {}) },
+    body: lipSyncBody(ctx), action: "lip_sync",
+  };
   if (imageModel(ctx)) {
     const converted = convertImage(ctx);
     const headers = { Authorization: "Bearer " + ctx.apiKey, "Content-Type": "application/json" };
@@ -1056,7 +1106,12 @@ export function parseSubmitEventDelta(ctx, event, previousState) {
 
 export function parseSubmitResponse(ctx, resp) {
   const body = resp.body || {};
-  if (body.code) throw new Error(body.code + ": " + (body.message || ""));
+  if (body.code && !((speechModel(ctx) && ((body.output || {}).audio || {}).url) || (lipSyncModel(ctx) && (body.output || {}).task_id))) throw new Error(body.code + ": " + (body.message || ""));
+  if (speechModel(ctx)) {
+    const audio = (body.output || {}).audio || {};
+    if (!trimmed(audio.url)) throw new Error("speech response has no audio URL");
+    return { taskId: ctx.publicTaskId || body.request_id, taskData: body, immediate: { status: "SUCCESS", progress: "100%", url: audio.url } };
+  }
   if (imageModel(ctx) && convertImage(ctx).synchronous) {
     const content = imageContent(body);
     const images = content.filter(function (part) {
@@ -1076,6 +1131,10 @@ export function parseSubmitResponse(ctx, resp) {
 }
 
 export function extractUsage(ctx) {
+  if (speechModel(ctx)) { speechInput(ctx); return { seconds: 240 }; }
+  // The host replaces this upper-bound reservation with independently measured
+  // input audio duration before billing. Client duration fields are ignored.
+  if (lipSyncModel(ctx)) { lipSyncBody(ctx); return { seconds: 120 }; }
   if (imageModel(ctx)) {
     const converted = convertImage(ctx);
     const estimate = imageEstimate(ctx, converted);
@@ -1103,6 +1162,7 @@ export function extractUsage(ctx) {
 }
 
 export function extractUsageOnSubmit(ctx, body) {
+  if (speechModel(ctx) || lipSyncModel(ctx)) return {};
   // Legacy ratio pricing uses this hook; task expressions use the same actual
   // facts through extractUsageOnComplete for both immediate and polled results.
   if (!imageModel(ctx)) return {};
@@ -1113,6 +1173,14 @@ export function extractUsageOnSubmit(ctx, body) {
 }
 
 export function extractUsageOnComplete(task, taskResult, body) {
+  if (speechModel(task) || lipSyncModel(task)) {
+    const output = (body || {}).output || {};
+    const seconds = speechModel(task) ? (output.audio || {}).duration : ((body || {}).usage || {}).duration;
+    const maximum = speechModel(task) ? 240 : 120;
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0 || seconds > maximum)
+      throw new Error("missing or invalid generated media duration; retain reservation for reconciliation");
+    return { seconds: Math.ceil(seconds) };
+  }
   if (imageModel(task)) return imageUsage(task, body || {});
   const output = (body && body.output) || {};
   const usage = (body && body.usage) || {};
@@ -1145,6 +1213,7 @@ export function buildQueryRequest(ctx) {
 
 export function parseTaskResult(ctx, body) {
   const output = body.output || {};
+  if (lipSyncModel(ctx) && output.task_status === "UNKNOWN") return { status: "UNKNOWN", reason: "supplier task result is unknown; reconciliation required" };
   if (output.task_status === "PENDING") return { status: "QUEUED" };
   if (output.task_status === "RUNNING") return { status: "IN_PROGRESS" };
   if (output.task_status === "SUCCEEDED") {
@@ -1190,6 +1259,7 @@ function videoURL(body) {
 export function listArtifacts(task) {
   if (task.status !== "SUCCESS") return [];
   const body = artifactData(task);
+  if ((body.output || {}).audio?.url) return [{ key: "audio", type: "audio" }];
   const images = imageContent(body).filter(function (part) {
     return part.image;
   });
@@ -1202,7 +1272,8 @@ export function listArtifacts(task) {
 
 export function buildContentRequest(ctx) {
   let url;
-  if (ctx.artifactKey === "video") url = videoURL(artifactData(ctx));
+  if (ctx.artifactKey === "audio") url = ((artifactData(ctx).output || {}).audio || {}).url;
+  else if (ctx.artifactKey === "video") url = videoURL(artifactData(ctx));
   else {
     const images = imageContent(artifactData(ctx)).filter(function (part) {
       return part.image;
@@ -1217,6 +1288,14 @@ export function buildContentRequest(ctx) {
 }
 
 export const native = {
+  createSpeechTask: function (ctx) {
+    if (!ctx.body || ctx.body.kind !== "json" || !ctx.body.value || typeof ctx.body.value !== "object") throw new Error("JSON object required");
+    const req = ctx.body.value;
+    const requestBody = { model: req.model, input: objectValue(req.input, "input") };
+    speechInput({ model: req.model, requestBody: requestBody });
+    return { kind: "submit", model: req.model, action: "speech_generation", requestBody: requestBody };
+  },
+  speechCreated: function (ctx, task) { return Object.assign({}, task.data || {}, { task_id: task.task_id }); },
   createImageTask: function (ctx) {
     if (!ctx.body || ctx.body.kind !== "json" || !ctx.body.value || typeof ctx.body.value !== "object" || Array.isArray(ctx.body.value))
       throw new Error("JSON object required");
@@ -1246,6 +1325,10 @@ export const native = {
       model: req.model,
       metadata: { input: input, parameters: parameters },
     };
+    if (req.model === "pixverse/pixverse-lipsync") {
+      lipSyncBody({ model: req.model, requestBody: requestBody });
+      return { kind: "submit", model: req.model, action: "lip_sync", requestBody: requestBody };
+    }
     if (input.prompt !== undefined) requestBody.prompt = input.prompt;
     const image = input.img_url || input.image_url || input.first_frame_url;
     if (image !== undefined) requestBody.image = image;
@@ -1263,6 +1346,9 @@ export const native = {
   taskStatus: function (ctx, task) {
     const data = task.data || {},
       output = Object.assign({}, data.output || {}, { task_id: task.task_id });
+    if (speechModel({ model: task.properties?.upstream_model_name || task.properties?.origin_model_name }) || !output.task_status) {
+      output.task_status = { SUCCESS: "SUCCEEDED", FAILURE: "FAILED", UNKNOWN: "UNKNOWN", IN_PROGRESS: "RUNNING" }[task.status] || "PENDING";
+    }
     return Object.assign({}, data, { output: output });
   },
   error: function (ctx, error) {

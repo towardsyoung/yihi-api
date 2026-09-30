@@ -111,6 +111,9 @@ func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
 			require.True(t, foundResponses, "openai_responses claim must be present")
 			assert.Equal(t, []string{"stream", "sync", "background"}, responsesClaim.Supports)
 			for _, model := range plugin.Meta.Models {
+				if plugin.Meta.Key == "alibaba" && (model == "qwen-audio-3.1-tts-next" || model == "pixverse/pixverse-lipsync") {
+					continue
+				}
 				binding, claimed := registry.Generation().LookupEndpoint("POST", "/v1/responses", model)
 				require.True(t, claimed, model)
 				assert.Same(t, plugin, binding.Plugin)

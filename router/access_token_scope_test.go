@@ -72,6 +72,8 @@ var accessTokenExemptRoutes = []string{
 	"GET /api/external/drama/tokens/:id/quota",
 	"POST /api/external/drama/tokens/:id/quota/add",
 	"GET /api/external/drama/tokens/:id/quota_logs",
+	"POST /api/external/drama/tokens/:id/lip-sync/quote",
+	"GET /api/external/drama/tokens/:id/lip-sync/tasks/:client_task_id",
 
 	// API key authentication (TokenAuthReadOnly).
 	"GET /api/usage/token/",

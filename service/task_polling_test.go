@@ -827,6 +827,7 @@ func (a *scriptedBatchPollingAdaptor) ParseBatchResult([]*model.Task, *http.Resp
 func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 	testCases := []struct {
 		name          string
+		upstreamModel string
 		statusCode    int
 		fetchErr      error
 		parse         *relaycommon.TaskInfo
@@ -841,6 +842,20 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 		wantState     string
 		wantUnchanged bool
 	}{
+		{
+			name: "Bailian missing task retains quota for reconciliation", upstreamModel: "pixverse/pixverse-lipsync",
+			statusCode: http.StatusNotFound, wantStatus: model.TaskStatusUnknown, wantReason: "供应商结果待核对",
+		},
+		{
+			name: "Bailian exhausted polling retains quota", upstreamModel: "pixverse/pixverse-lipsync",
+			statusCode: http.StatusServiceUnavailable, priorFailures: 5, maxFailures: 6, wantFailures: 6,
+			wantStatus: model.TaskStatusUnknown, wantReason: "供应商结果待核对",
+		},
+		{
+			name: "Bailian definite supplier failure refunds", upstreamModel: "pixverse/pixverse-lipsync",
+			statusCode: http.StatusOK, parse: &relaycommon.TaskInfo{Status: model.TaskStatusFailure, Reason: "provider rejected"},
+			wantStatus: model.TaskStatusFailure, wantRefund: true, wantReason: "provider rejected",
+		},
 		{
 			name:          "404 fails immediately and refunds",
 			statusCode:    http.StatusNotFound,
@@ -927,6 +942,7 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 			}
 
 			task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
+			task.Properties.UpstreamModelName = testCase.upstreamModel
 			task.TaskID = "task_poll_class"
 			task.PrivateData.UpstreamTaskID = "upstream_poll_class"
 			task.PrivateData.PollFailures = testCase.priorFailures

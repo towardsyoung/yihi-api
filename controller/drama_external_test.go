@@ -81,6 +81,55 @@ func seedDramaToken(t *testing.T, db *gorm.DB) *model.Token {
 	return token
 }
 
+func TestDramaMediaQuoteAndTaskOwnership(t *testing.T) {
+	db := setupDramaExternalTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Task{}))
+	token := seedDramaToken(t, db)
+	withTieredBillingConfig(t, map[string]string{"qwen-audio-3.1-tts-next": "tiered_expr", "pixverse/pixverse-lipsync": "tiered_expr"}, map[string]string{"qwen-audio-3.1-tts-next": `u("seconds") * 0.01`, "pixverse/pixverse-lipsync": `u("seconds") * 0.01`})
+	callQuote := func(name string, seconds float64) map[string]any {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		payload, err := common.Marshal(map[string]any{"model": name, "seconds": seconds})
+		require.NoError(t, err)
+		c.Request = httptest.NewRequest(http.MethodPost, "/quote", strings.NewReader(string(payload)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(token.Id)}}
+		DramaLipSyncQuote(c)
+		var response map[string]any
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.Equal(t, true, response["success"])
+		return response["data"].(map[string]any)
+	}
+	speech := callQuote("qwen-audio-3.1-tts-next", 1)
+	require.Equal(t, float64(240), speech["seconds"], "speech estimates must match the gateway's maximum reservation")
+	require.Equal(t, 240*0.01*common.QuotaPerUnit, speech["quota"])
+	require.Equal(t, false, speech["sufficient"])
+	lip := callQuote("pixverse/pixverse-lipsync", 9.2)
+	require.Equal(t, float64(10), lip["seconds"])
+	clientID := "digital-human:1:speech:test"
+	body, err := common.Marshal(map[string]any{"output": map[string]any{"audio": map[string]any{"url": "https://media.example/audio.mp3"}}})
+	require.NoError(t, err)
+	task := model.Task{TaskID: "task_owned", ClientTaskID: &clientID, UserId: token.UserId, Platform: "alibaba", Status: model.TaskStatusSuccess, Properties: model.Properties{UpstreamModelName: "qwen-audio-3.1-tts-next"}, PrivateData: model.TaskPrivateData{TokenId: token.Id}, Data: body}
+	require.NoError(t, db.Create(&task).Error)
+	other := model.Token{UserId: token.UserId, Name: "other local user", Key: "another-test-key", Status: common.TokenStatusEnabled, Group: "default"}
+	require.NoError(t, db.Create(&other).Error)
+	for _, tc := range []struct {
+		tokenID int
+		status  int
+	}{{token.Id, 200}, {other.Id, 404}} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, "/task", nil)
+		c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(tc.tokenID)}, {Key: "client_task_id", Value: clientID}}
+		DramaLipSyncTask(c)
+		require.Equal(t, tc.status, recorder.Code)
+		if tc.status == 404 {
+			require.NotContains(t, recorder.Body.String(), "audio.mp3")
+		}
+		require.NotContains(t, recorder.Body.String(), token.Key)
+	}
+}
+
 func TestAddDramaTokenQuotaIdempotent(t *testing.T) {
 	db := setupDramaExternalTestDB(t)
 	token := seedDramaToken(t, db)

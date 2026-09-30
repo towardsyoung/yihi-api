@@ -72,6 +72,9 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	if !exist {
 		return service.TaskErrorWrapperLocal(errors.New("task_origin_not_exist"), "task_not_exist", http.StatusBadRequest)
 	}
+	if service.IsBailianLipSyncTask(originTask) && originTask.PrivateData.TokenId != info.TokenId {
+		return service.TaskErrorWrapperLocal(errors.New("task_origin_not_exist"), "task_not_exist", http.StatusNotFound)
+	}
 
 	// 从原始任务推导模型名称
 	if info.OriginModelName == "" {
@@ -261,6 +264,13 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		pluginKey = pinnedPlugin.Plugin.Meta.Key
 	}
 	exprStr, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, info.UpstreamModelName)
+	paidBailian := pluginKey == "alibaba" && (info.UpstreamModelName == "qwen-audio-3.1-tts-next" || info.UpstreamModelName == "pixverse/pixverse-lipsync")
+	if paidBailian && strings.TrimSpace(c.GetHeader("Idempotency-Key")) == "" {
+		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("Idempotency-Key is required for paid media generation"), "invalid_idempotency_key", http.StatusBadRequest)
+	}
+	if pluginKey == "alibaba" && (info.UpstreamModelName == "qwen-audio-3.1-tts-next" || info.UpstreamModelName == "pixverse/pixverse-lipsync") && !exists {
+		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("configure per-second usage pricing for this model first"), "model_price_error", http.StatusBadRequest)
+	}
 	useTiered := exists || billing_setting.GetBillingMode(modelName) == billing_setting.BillingModeTieredExpr
 	if useTiered {
 		provider, supported := adaptor.(channel.TaskUsageFactsProvider)
@@ -295,6 +305,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		}
 		groupRatioInfo := helper.HandleGroupRatio(c, info)
 		quota, clamp := common.QuotaRoundChecked(cost * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
+		if paidBailian && (quota <= 0 || clamp != nil) {
+			return nil, service.TaskErrorWrapperLocal(fmt.Errorf("configure a valid positive per-second price"), "model_price_error", http.StatusBadRequest)
+		}
 		noteTaskQuotaClamp(info, clamp)
 		priceData = types.PriceData{Quota: quota, QuotaToPreConsume: quota, GroupRatioInfo: groupRatioInfo}
 		info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{BillingMode: billing_setting.BillingModeTieredExpr, ModelName: modelName, ExprString: exprStr, ExprHash: billingexpr.ExprHashString(exprStr), GroupRatio: groupRatioInfo.GroupRatio, EstimatedQuotaBeforeGroup: cost * common.QuotaPerUnit, EstimatedQuotaAfterGroup: quota, EstimatedTier: trace.MatchedTier, QuotaPerUnit: common.QuotaPerUnit, ExprVersion: billingexpr.ExprVersion(exprStr), TaskUsageBilling: true, UsageFacts: facts}
@@ -367,7 +380,23 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	// or 202 Accepted, and parseSubmitResponse receives the exact status code.
 	if resp.StatusCode/100 != 2 {
 		responseBody, _ := io.ReadAll(resp.Body)
-		return nil, service.TaskErrorWrapper(fmt.Errorf("%s", string(responseBody)), "fail_to_fetch_task", resp.StatusCode)
+		var receipt struct {
+			Output struct {
+				TaskID string `json:"task_id"`
+				Audio  struct {
+					URL string `json:"url"`
+				} `json:"audio"`
+			} `json:"output"`
+		}
+		if paidBailian && common.Unmarshal(responseBody, &receipt) == nil && (receipt.Output.TaskID != "" || receipt.Output.Audio.URL != "") {
+			// A provider receipt takes precedence over an inconsistent HTTP status.
+			resp.Body = io.NopCloser(bytes.NewReader(responseBody))
+		} else {
+			if paidBailian && resp.StatusCode >= 500 {
+				c.Set("bailian_submission_uncertain", true)
+			}
+			return nil, service.TaskErrorWrapper(fmt.Errorf("%s", string(responseBody)), "fail_to_fetch_task", resp.StatusCode)
+		}
 	}
 
 	// 10. Parse only. The controller presents the response after the durable
@@ -496,6 +525,9 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	if !exist || !originTask.ResultRetrievable() {
 		taskResp = service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusBadRequest)
 		return
+	}
+	if service.IsBailianLipSyncTask(originTask) && originTask.PrivateData.TokenId != common.GetContextKeyInt(c, constant.ContextKeyTokenId) {
+		return nil, service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusNotFound)
 	}
 
 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.RequestURI, "/v1/videos/")

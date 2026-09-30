@@ -495,6 +495,9 @@ func executeTaskSubmissionWith(
 			return nil, service.TaskErrorWrapperLocal(reserveErr, "reserve_task_failed", http.StatusInternalServerError)
 		}
 		relayInfo.PublicTaskID = reservedTask.TaskID
+		if service.IsBailianLipSyncTask(reservedTask) && reservedTask.PrivateData.TokenId > 0 && reservedTask.PrivateData.TokenId != relayInfo.TokenId {
+			return nil, service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusNotFound)
+		}
 		if !shouldSubmit {
 			c.Header("Idempotency-Replayed", "true")
 			return &taskSubmissionOutcome{Result: &relay.TaskSubmitResult{}, Task: reservedTask, RelayInfo: relayInfo}, nil
@@ -506,6 +509,12 @@ func executeTaskSubmissionWith(
 			prepared.SubmitTime = reservedTask.SubmitTime
 			prepared.SubmitLeaseOwner, prepared.SubmitLeaseExpiresAt = reservedTask.SubmitLeaseOwner, reservedTask.SubmitLeaseExpiresAt
 			prepared.Status = model.TaskStatusPreparing
+			// Persist a non-reclaimable reservation before sending paid media work.
+			// A crashed submitter must never cause a second provider submission.
+			if prepared.Properties.UpstreamModelName == "qwen-audio-3.1-tts-next" || prepared.Properties.UpstreamModelName == "pixverse/pixverse-lipsync" {
+				prepared.Status, prepared.Progress = model.TaskStatusUnknown, "100%"
+				prepared.FailReason = "提交进行中，保留预扣额度，请查询原任务"
+			}
 			prepared.Quota = relayInfo.PriceData.Quota
 			prepared.PrivateData.BillingSource = relayInfo.BillingSource
 			prepared.PrivateData.SubscriptionId = relayInfo.SubscriptionId
@@ -534,8 +543,15 @@ func executeTaskSubmissionWith(
 	durable := false
 	stage := "start"
 	defer func() {
+		// A transport failure after submission may already have incurred provider
+		// cost. Keep the idempotent reservation for reconciliation, never retry it.
+		acceptedPaidWork := c.GetBool("bailian_paid_request_sent") && result != nil && (result.Immediate == nil || result.Immediate.Status != model.TaskStatusFailure)
+		uncertain := !durable && (c.GetBool("bailian_submission_uncertain") || acceptedPaidWork)
 		if !durable && reservedTask != nil {
 			reservedTask.Status = model.TaskStatusFailure
+			if uncertain {
+				reservedTask.Status = model.TaskStatusUnknown
+			}
 			reservedTask.Progress = "100%"
 			reservedTask.FinishTime = time.Now().Unix()
 			reservedTask.SubmitLeaseOwner = ""
@@ -547,7 +563,7 @@ func executeTaskSubmissionWith(
 				common.SysError("update failed reserved task: " + err.Error())
 			}
 		}
-		if !durable && relayInfo.Billing != nil {
+		if !durable && !uncertain && relayInfo.Billing != nil {
 			diagnostics.refund(stage)
 			relayInfo.Billing.Refund(c)
 		}
@@ -610,7 +626,14 @@ func executeTaskSubmissionWith(
 
 		stage = "submit"
 		result, taskErr = submit(c, relayInfo)
-		if requestErr := c.Request.Context().Err(); requestErr != nil {
+		if c.GetBool("bailian_paid_request_sent") && taskErr != nil && taskErr.StatusCode >= 500 {
+			c.Set("bailian_submission_uncertain", true)
+			taskErr.NoRetry = true
+		}
+		if c.GetBool("bailian_submission_uncertain") && taskErr != nil {
+			taskErr.NoRetry = true
+		}
+		if requestErr := c.Request.Context().Err(); requestErr != nil && !c.GetBool("bailian_paid_request_sent") {
 			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
 			break
@@ -654,7 +677,7 @@ func executeTaskSubmissionWith(
 		diagnostics.failed("submit", "missing_result", taskErr, false)
 		return nil, taskErr
 	}
-	if requestErr := c.Request.Context().Err(); requestErr != nil {
+	if requestErr := c.Request.Context().Err(); requestErr != nil && !c.GetBool("bailian_paid_request_sent") {
 		diagnostics.cancelled("before_reserve", retryParam.GetRetry()+1)
 		return nil, service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
 	}
@@ -673,7 +696,7 @@ func executeTaskSubmissionWith(
 		}
 		diagnostics.reserve("reserve_complete", result.Quota)
 	}
-	if requestErr := c.Request.Context().Err(); requestErr != nil {
+	if requestErr := c.Request.Context().Err(); requestErr != nil && !c.GetBool("bailian_paid_request_sent") {
 		diagnostics.cancelled("before_insert", retryParam.GetRetry()+1)
 		return nil, service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
 	}
@@ -921,7 +944,7 @@ func RelayTaskFetchByClientTaskID(c *gin.Context) {
 		respondTaskError(c, service.TaskErrorWrapper(err, "get_task_failed", http.StatusInternalServerError))
 		return
 	}
-	if !exist {
+	if !exist || (service.IsBailianLipSyncTask(task) && task.PrivateData.TokenId != common.GetContextKeyInt(c, constant.ContextKeyTokenId)) {
 		respondTaskError(c, service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusNotFound))
 		return
 	}

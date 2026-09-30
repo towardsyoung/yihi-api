@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
+	builtinplugins "github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
@@ -618,6 +619,144 @@ export function buildQueryRequest(){throw new Error("completed submissions must 
 			assert.Equal(t, initial-want, updated.Quota, "terminal settlement is idempotent")
 		})
 	}
+}
+
+func TestBailianSpeechSettlementDatabase(t *testing.T) {
+	db, dialect := openTaskDialectDatabase(t, &model.User{}, &model.Channel{}, &model.Task{}, &model.Log{})
+	oldDB, oldLogDB := model.DB, model.LOG_DB
+	oldMain, oldLog := common.MainDatabaseType(), common.LogDatabaseType()
+	oldRedis, oldMemory, oldBatch, oldConsume, oldExport := common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled
+	model.DB, model.LOG_DB = db, db
+	common.SetDatabaseTypes(dialect, dialect)
+	common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = false, false, false, true, false
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = oldDB, oldLogDB
+		common.SetDatabaseTypes(oldMain, oldLog)
+		common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = oldRedis, oldMemory, oldBatch, oldConsume, oldExport
+	})
+	const name = "qwen-audio-3.1-tts-next"
+	withTieredBillingConfig(t, map[string]string{name: "tiered_expr"}, map[string]string{name: `u("seconds") * 0.01`})
+	source, err := builtinplugins.Source("alibaba")
+	require.NoError(t, err)
+	plugin, err := pluginruntime.CompilePlugin(source, pluginruntime.Options{Key: "alibaba"})
+	require.NoError(t, err)
+	for index, tc := range []struct {
+		name     string
+		duration float64
+		billed   int
+	}{{"actual seconds rounded up", 12.2, 13}, {"invalid provider duration retains reservation", -1, 240}} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				require.Equal(t, "/api/v1/services/audio/tts/SpeechSynthesizer", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				body, _ := common.Marshal(map[string]any{"request_id": "vendor-request", "output": map[string]any{"audio": map[string]any{"url": "https://media.example/result.mp3", "duration": tc.duration}}})
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+			initial := int(20 * common.QuotaPerUnit)
+			user := model.User{Username: fmt.Sprintf("speech_user_%d", index), AffCode: fmt.Sprintf("speech_aff_%d", index), Quota: initial}
+			require.NoError(t, db.Create(&user).Error)
+			ch := model.Channel{Name: "speech mock provider", Type: constant.ChannelTypeTaskPlugin}
+			require.NoError(t, db.Create(&ch).Error)
+			c := taskSubmissionTestContext()
+			c.Request.Header.Set("Idempotency-Key", fmt.Sprintf("speech-%d", index))
+			c.Set("group", "default")
+			c.Set("username", user.Username)
+			c.Set("task_request", map[string]any{"model": name, "input": map[string]any{"text_prompt": "test speech", "format": "mp3"}})
+			c.Set(pluginruntime.ContextKeyPinnedPlugin, pluginruntime.PinnedPlugin{Plugin: plugin})
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, name)
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+			common.SetContextKey(c, constant.ContextKeyChannelId, ch.Id)
+			common.SetContextKey(c, constant.ContextKeyChannelType, ch.Type)
+			info := taskSubmissionRelayInfo(nil)
+			info.UserId, info.TokenId, info.OriginModelName, info.UserGroup, info.IsPlayground = user.Id, 42, name, "default", true
+			info.UserSetting.BillingPreference = "wallet_only"
+			info.PublicTaskID, info.LockedChannel = model.GenerateTaskID(), &ch
+			outcome, taskErr := executeTaskSubmission(c, info)
+			require.Nil(t, taskErr)
+			want := common.QuotaRound(float64(tc.billed) * 0.01 * common.QuotaPerUnit)
+			assert.Equal(t, want, outcome.Task.Quota)
+			assert.Equal(t, 240*0.01*common.QuotaPerUnit, info.TieredBillingSnapshot.EstimatedQuotaBeforeGroup)
+			var updated model.User
+			require.NoError(t, db.First(&updated, user.Id).Error)
+			assert.Equal(t, initial-want, updated.Quota)
+			assert.Equal(t, want, updated.UsedQuota)
+			var logs []model.Log
+			require.NoError(t, db.Where("user_id = ?", user.Id).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			assert.Equal(t, want, logs[0].Quota)
+			_, taskErr = executeTaskSubmission(c, info)
+			require.Nil(t, taskErr)
+			assert.Equal(t, 1, calls, "same key must never regenerate or charge again")
+		})
+	}
+}
+
+func TestBailianUncertainSubmissionDatabase(t *testing.T) {
+	events := []string{}
+	db := setupTaskSubmissionDatabase(t, true, &events)
+	c := taskSubmissionTestContext()
+	c.Request.Header.Set("Idempotency-Key", "uncertain-speech")
+	billing := &taskSubmissionTestBilling{events: &events}
+	info := taskSubmissionRelayInfo(billing)
+	info.TokenId, info.UpstreamModelName = 42, "qwen-audio-3.1-tts-next"
+	info.PriceData.Quota = 240
+	calls := 0
+	submit := func(c *gin.Context, info *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		calls++
+		require.NoError(t, info.BeforeTaskSubmit("alibaba"))
+		var stored model.Task
+		require.NoError(t, db.First(&stored).Error)
+		assert.Equal(t, model.TaskStatus(model.TaskStatusUnknown), stored.Status, "crashed submitters cannot reclaim a paid reservation")
+		c.Set("bailian_paid_request_sent", true)
+		c.Set("bailian_submission_uncertain", true)
+		return nil, &dto.TaskError{StatusCode: 502, Message: "timeout"}
+	}
+	_, taskErr := executeTaskSubmissionWith(c, info, submit)
+	require.NotNil(t, taskErr)
+	assert.True(t, taskErr.NoRetry)
+	assert.Zero(t, billing.refunds)
+	var stored model.Task
+	require.NoError(t, db.First(&stored).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusUnknown), stored.Status)
+	assert.Equal(t, 240, stored.Quota)
+	_, taskErr = executeTaskSubmissionWith(c, info, submit)
+	require.Nil(t, taskErr)
+	assert.Equal(t, 1, calls)
+	info.TokenId = 43
+	_, taskErr = executeTaskSubmissionWith(c, info, submit)
+	require.NotNil(t, taskErr)
+	assert.Equal(t, 404, taskErr.StatusCode, "a shared account token cannot retrieve another token's paid task")
+}
+
+func TestBailianAcceptedPersistenceFailureDatabase(t *testing.T) {
+	events := []string{}
+	db := setupTaskSubmissionDatabase(t, true, &events)
+	c := taskSubmissionTestContext()
+	c.Request.Header.Set("Idempotency-Key", "accepted-before-db-failure")
+	billing := &taskSubmissionTestBilling{events: &events}
+	info := taskSubmissionRelayInfo(billing)
+	info.TokenId, info.UpstreamModelName, info.PriceData.Quota = 42, "pixverse/pixverse-lipsync", 120
+	failed := false
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:fail-paid-persistence", func(tx *gorm.DB) {
+		if c.GetBool("bailian_paid_request_sent") && !failed {
+			failed = true
+			tx.AddError(errors.New("database interrupted after provider accepted"))
+		}
+	}))
+	_, taskErr := executeTaskSubmissionWith(c, info, func(c *gin.Context, info *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		require.NoError(t, info.BeforeTaskSubmit("alibaba"))
+		c.Set("bailian_paid_request_sent", true)
+		return &relay.TaskSubmitResult{Platform: "alibaba", UpstreamTaskID: "paid-provider-id", Quota: 120}, nil
+	})
+	require.NotNil(t, taskErr)
+	assert.Zero(t, billing.refunds, "accepted paid work must not become free after a local persistence error")
+	var stored model.Task
+	require.NoError(t, db.First(&stored).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusUnknown), stored.Status)
+	assert.Equal(t, 120, stored.Quota)
 }
 
 func TestAcceptedSubmitStreamNeverRetries(t *testing.T) {

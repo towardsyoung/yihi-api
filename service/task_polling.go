@@ -89,6 +89,14 @@ func sweepTimedOutTasks(ctx context.Context) {
 
 	for _, task := range tasks {
 		isLegacy := task.SubmitTime > 0 && task.SubmitTime < model.TaskRefundLegacyCutoff
+		if IsBailianLipSyncTask(task) {
+			oldStatus := task.Status
+			task.Status, task.Progress, task.FailReason = model.TaskStatusUnknown, "100%", "查询超时，供应商结果待核对，保留预扣额度"
+			if _, err := task.UpdateWithStatus(oldStatus); err != nil {
+				common.SysError("preserve uncertain Bailian task: " + err.Error())
+			}
+			continue
+		}
 
 		oldStatus := task.Status
 		task.Status = model.TaskStatusFailure
@@ -255,6 +263,14 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 		var failedIDs []int64
 		for _, upstreamID := range taskIds {
 			if t, ok := taskM[upstreamID]; ok {
+				if IsBailianLipSyncTask(t) {
+					oldStatus := t.Status
+					t.Status, t.Progress, t.FailReason = model.TaskStatusUnknown, "100%", "渠道不可用，供应商结果待核对，保留预扣额度"
+					if _, updateErr := t.UpdateWithStatus(oldStatus); updateErr != nil {
+						logger.LogError(ctx, updateErr.Error())
+					}
+					continue
+				}
 				failedIDs = append(failedIDs, t.ID)
 			}
 		}
@@ -839,6 +855,11 @@ func recordPollFailureForTasks(ctx context.Context, adaptor TaskPollingAdaptor, 
 }
 
 func failTaskFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, fromStatus model.TaskStatus, reason string) error {
+	if IsBailianLipSyncTask(task) {
+		task.Status, task.Progress, task.FailReason = model.TaskStatusUnknown, "100%", "供应商结果待核对，保留预扣额度："+reason
+		_, err := task.UpdateWithStatus(fromStatus)
+		return err
+	}
 	now := time.Now().Unix()
 	task.Status = model.TaskStatusFailure
 	task.Progress = taskcommon.ProgressComplete

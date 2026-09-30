@@ -1075,6 +1075,9 @@ func applyOriginTaskIntent(c *gin.Context, intent map[string]any, meta pluginrun
 		if !exist || task == nil {
 			return &originTaskIntentError{Code: "origin_task_not_found", Message: "origin task not found or not owned by you", StatusCode: http.StatusBadRequest}
 		}
+		if service.IsBailianLipSyncTask(task) && task.PrivateData.TokenId != common.GetContextKeyInt(c, constant.ContextKeyTokenId) {
+			return &originTaskIntentError{Code: "origin_task_not_found", Message: "origin task not found or not owned by you", StatusCode: http.StatusNotFound}
+		}
 		if _, allowed := allowedPlatform[task.Platform]; !allowed {
 			return &originTaskIntentError{Code: "origin_task_platform_mismatch", Message: "origin task does not belong to this plugin", StatusCode: http.StatusBadRequest}
 		}
@@ -1161,6 +1164,9 @@ func renderTaskPluginQuery(
 	)
 	tasksByID := make(map[string]*model.Task, len(tasks))
 	for _, task := range tasks {
+		if service.IsBailianLipSyncTask(task) && task.PrivateData.TokenId != common.GetContextKeyInt(c, constant.ContextKeyTokenId) {
+			continue
+		}
 		tasksByID[task.TaskID] = task
 	}
 	views := make([]dto.TaskView, 0, len(taskIDs))

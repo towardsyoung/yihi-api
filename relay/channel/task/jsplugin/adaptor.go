@@ -184,6 +184,28 @@ func (a *TaskAdaptor) ExtractUsageFactsValidated(c *gin.Context, info *relaycomm
 	if !ok {
 		return nil, fmt.Errorf("plugin usage hook must return an object")
 	}
+	if a.plugin.Meta.Key == "alibaba" && info.UpstreamModelName == "pixverse/pixverse-lipsync" {
+		var body struct {
+			Input struct {
+				Media []struct {
+					Type string `json:"type"`
+					URL  string `json:"url"`
+				} `json:"media"`
+			} `json:"input"`
+		}
+		if err := convert(a.submit.Body, &body); err != nil {
+			return nil, err
+		}
+		for _, media := range body.Input.Media {
+			if media.Type == "audio_url" {
+				seconds, err := service.MeasureBailianMediaDuration(c.Request.Context(), media.URL, "", 100<<20, 120)
+				if err != nil {
+					return nil, err
+				}
+				facts["seconds"] = seconds
+			}
+		}
+	}
 	validated, _, err := a.validatedUsageRatios(facts, info.UpstreamModelName, info.OriginModelName)
 	if err != nil {
 		return nil, err
@@ -448,7 +470,14 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, bod
 		c.Request.Method = strings.ToUpper(a.submit.Method)
 		defer func() { c.Request.Method = originalMethod }()
 	}
-	return channel.DoTaskApiRequest(a, c, info, body)
+	resp, err := channel.DoTaskApiRequest(a, c, info, body)
+	if a.plugin.Meta.Key == "alibaba" && (info.UpstreamModelName == "pixverse/pixverse-lipsync" || info.UpstreamModelName == "qwen-audio-3.1-tts-next") {
+		c.Set("bailian_paid_request_sent", true)
+		if err != nil || (resp != nil && resp.StatusCode >= 500) {
+			c.Set("bailian_submission_uncertain", true)
+		}
+	}
+	return resp, err
 }
 
 func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (_ *channel.TaskSubmitResponse, taskErr *dto.TaskError) {
@@ -487,6 +516,9 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 		failure := service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusBadGateway)
 		failure.NoRetry = streaming
 		return nil, failure
+	}
+	if a.plugin.Meta.Key == "alibaba" && info.UpstreamModelName == "qwen-audio-3.1-tts-next" {
+		a.meterBailianOutput(c.Request.Context(), responseBody, true)
 	}
 	headers := make(map[string][]string, len(resp.Header))
 	maps.Copy(headers, resp.Header)
@@ -767,6 +799,9 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, bod
 	if common.Unmarshal(body, &decoded) == nil {
 		input = decoded
 	}
+	if a.plugin.Meta.Key == "alibaba" && task != nil && task.Properties.UpstreamModelName == "pixverse/pixverse-lipsync" {
+		a.meterBailianOutput(context.Background(), input, false)
+	}
 	key, baseURL, proxy := a.queryCredentials()
 	if task != nil && task.PrivateData.Key != "" {
 		key = task.PrivateData.Key
@@ -811,6 +846,8 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, bod
 			upstreamModel, _ := ctx["upstreamModel"].(string)
 			originModel, _ := ctx["model"].(string)
 			a.applyCompletionUsageFacts(result, facts, upstreamModel, originModel)
+		} else if service.IsBailianLipSyncTask(task) {
+			logger.LogWarn(context.Background(), "Bailian completion duration unavailable; retaining reserved quota: "+hookErr.Error())
 		}
 	}
 	taskStatus := model.TaskStatus(result.Status)
@@ -823,6 +860,66 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, bod
 		time.Since(started).Milliseconds(),
 	)
 	return result, nil
+}
+
+// Missing provider duration is measured from the generated artifact. Never use
+// client-supplied output length or replace an explicitly invalid provider fact.
+func (a *TaskAdaptor) meterBailianOutput(ctx context.Context, value any, speech bool) {
+	body, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	output, ok := body["output"].(map[string]any)
+	if !ok {
+		return
+	}
+	var target map[string]any
+	var rawURL, format string
+	maximum, maxBytes := 120.0, int64(300<<20)
+	if speech {
+		target, _ = output["audio"].(map[string]any)
+		if target == nil {
+			return
+		}
+		rawURL, _ = target["url"].(string)
+		format, maximum, maxBytes = ".mp3", 240, 100<<20
+		if a.submit != nil {
+			var request struct {
+				Input struct {
+					Format string `json:"format"`
+				} `json:"input"`
+			}
+			if convert(a.submit.Body, &request) == nil && request.Input.Format != "" {
+				format = "." + request.Input.Format
+			}
+		}
+	} else {
+		if output["task_status"] != "SUCCEEDED" {
+			return
+		}
+		target, _ = body["usage"].(map[string]any)
+		if target == nil {
+			target = map[string]any{}
+			body["usage"] = target
+		}
+		rawURL, _ = output["video_url"].(string)
+		format = ".mp4"
+	}
+	if _, present := target["duration"]; present {
+		return
+	}
+	if speech && strings.HasPrefix(rawURL, "http://") {
+		if parsed, err := url.Parse(rawURL); err == nil && strings.HasSuffix(parsed.Hostname(), ".aliyuncs.com") {
+			parsed.Scheme = "https"
+			rawURL = parsed.String()
+		}
+	}
+	seconds, err := service.MeasureBailianMediaDuration(ctx, rawURL, format, maxBytes, maximum)
+	if err != nil {
+		logger.LogWarn(ctx, "Bailian duration verification failed; retaining reservation: "+err.Error())
+		return
+	}
+	target["duration"] = seconds
 }
 
 func (a *TaskAdaptor) applyCompletionUsageFacts(result *relaycommon.TaskInfo, facts any, models ...string) error {

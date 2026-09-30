@@ -25,6 +25,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestBailianMediaHooks(t *testing.T) {
+	source, err := builtinplugins.Source("alibaba")
+	require.NoError(t, err)
+	registry := jsplugin.NewRegistry()
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{Key: "alibaba"})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		model, route string
+		request      map[string]any
+		reserved     float64
+		body         map[string]any
+	}{
+		{"qwen-audio-3.1-tts-next", "/ali/api/v1/services/audio/tts/SpeechSynthesizer", map[string]any{"input": map[string]any{"text_prompt": "read this", "format": "mp3", "duration": 1}}, 240, map[string]any{"output": map[string]any{"audio": map[string]any{"duration": 9.2}}}},
+		{"pixverse/pixverse-lipsync", "/ali/api/v1/services/aigc/video-generation/video-synthesis", map[string]any{"metadata": map[string]any{"input": map[string]any{"media": []any{map[string]any{"type": "audio_url", "url": "https://media.example/audio.mp3"}, map[string]any{"type": "video_url", "url": "https://media.example/video.mp4"}}}, "parameters": map[string]any{"duration": 1}}}, 120, map[string]any{"usage": map[string]any{"duration": 9.2}}},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			_, found := registry.Generation().LookupEndpoint("POST", "/v1/responses", tc.model)
+			assert.False(t, found, "native media models must not enter the Responses decoder")
+			ctx := map[string]any{"model": tc.model, "upstreamModel": tc.model, "requestBody": tc.request, "baseUrl": "https://workspace.cn-beijing.maas.aliyuncs.com", "apiKey": "test"}
+			usage, err := plugin.Engine.Call(t.Context(), "extractUsage", ctx)
+			require.NoError(t, err)
+			assert.Equal(t, tc.reserved, alibabaObject(t, usage)["seconds"], "client duration cannot lower reservation")
+			request, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+			require.NoError(t, err)
+			assert.Equal(t, "https://workspace.cn-beijing.maas.aliyuncs.com"+strings.TrimPrefix(tc.route, "/ali"), alibabaObject(t, request)["url"])
+			ctx["upstream"], ctx["publicTaskId"] = map[string]any{"kind": "new_api"}, "task_stable"
+			chained, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+			require.NoError(t, err)
+			assert.Equal(t, "task_stable", alibabaObject(t, chained)["headers"].(map[string]any)["Idempotency-Key"])
+			facts, err := plugin.Engine.Call(t.Context(), "extractUsageOnComplete", ctx, map[string]any{"status": "SUCCESS"}, tc.body)
+			require.NoError(t, err)
+			assert.Equal(t, float64(10), alibabaObject(t, facts)["seconds"])
+			_, err = plugin.Engine.Call(t.Context(), "extractUsageOnComplete", ctx, map[string]any{"status": "SUCCESS"}, map[string]any{"usage": map[string]any{"duration": "9"}})
+			require.Error(t, err, "missing or untrusted duration must retain reservation")
+		})
+	}
+	ctx := map[string]any{"upstreamModel": "pixverse/pixverse-lipsync"}
+	result, err := plugin.Engine.Call(t.Context(), "parseTaskResult", ctx, map[string]any{"output": map[string]any{"task_status": "UNKNOWN"}})
+	require.NoError(t, err)
+	assert.Equal(t, "UNKNOWN", alibabaObject(t, result)["status"])
+}
+
 func TestAlibabaResponsesProtocol(t *testing.T) {
 	source, err := builtinplugins.Source("alibaba")
 	require.NoError(t, err)
@@ -34,6 +76,9 @@ func TestAlibabaResponsesProtocol(t *testing.T) {
 
 	t.Run("claims every Ali model", func(t *testing.T) {
 		for _, model := range plugin.Meta.Models {
+			if model == "qwen-audio-3.1-tts-next" || model == "pixverse/pixverse-lipsync" {
+				continue
+			}
 			binding, found := registry.Generation().LookupEndpoint("POST", "/v1/responses", model)
 			require.True(t, found, model)
 			assert.Same(t, plugin, binding.Plugin)
@@ -42,7 +87,7 @@ func TestAlibabaResponsesProtocol(t *testing.T) {
 	})
 
 	t.Run("selects image and video usage profiles for every declared model", func(t *testing.T) {
-		require.Len(t, plugin.Meta.UsageProfiles, 9)
+		require.Len(t, plugin.Meta.UsageProfiles, 11)
 		covered := make(map[string]bool)
 		for _, profile := range plugin.Meta.UsageProfiles {
 			for _, name := range profile.Models {
@@ -56,6 +101,8 @@ func TestAlibabaResponsesProtocol(t *testing.T) {
 			assert.Empty(t, examples)
 			isImage := strings.Contains(name, "-image") || strings.Contains(name, "-t2i") || strings.Contains(name, "-i2i")
 			switch {
+			case name == "qwen-audio-3.1-tts-next" || name == "pixverse/pixverse-lipsync":
+				assert.ElementsMatch(t, []string{"seconds"}, keysOf(schema), name)
 			case strings.HasPrefix(name, "qwen-image-3.0"):
 				assert.ElementsMatch(t, []string{"image_count", "output_image_type", "input_image_count"}, keysOf(schema), name)
 				assert.Equal(t, plugin.Meta.UsageSchema["image_count"], schema["image_count"], name)

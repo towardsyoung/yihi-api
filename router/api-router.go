@@ -312,6 +312,8 @@ func SetApiRouter(router *gin.Engine) {
 			dramaExternalRoute.GET("/tokens/:id/quota", controller.DramaTokenQuota)
 			dramaExternalRoute.POST("/tokens/:id/quota/add", controller.DramaTokenQuotaAdd)
 			dramaExternalRoute.GET("/tokens/:id/quota_logs", controller.DramaTokenQuotaLogs)
+			dramaExternalRoute.POST("/tokens/:id/lip-sync/quote", controller.DramaLipSyncQuote)
+			dramaExternalRoute.GET("/tokens/:id/lip-sync/tasks/:client_task_id", controller.DramaLipSyncTask)
 		}
 
 		redemptionRoute := apiRouter.Group("/redemption")
