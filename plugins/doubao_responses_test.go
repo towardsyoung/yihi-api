@@ -50,7 +50,7 @@ func TestDoubaoResponsesProtocol(t *testing.T) {
 				"resolution": "1080p",
 			},
 		},
-		wantUsageKeys:  []string{"resolution", "tokens", "video_input"},
+		wantUsageKeys:  []string{"resolution", "seconds", "video_input"},
 		wantVendorName: "doubao",
 	})
 }
@@ -246,7 +246,7 @@ func TestDoubaoImageSubmission(t *testing.T) {
 		_, found = registry.Generation().LookupEndpoint(http.MethodPost, "/v1/images/generations", "doubao-seedance-2-0-260128")
 		assert.False(t, found)
 		schema, _ := plugin.Meta.UsageForModel("doubao-seedance-2-0-260128")
-		assert.ElementsMatch(t, []string{"tokens", "resolution", "video_input"}, keysOf(schema))
+		assert.ElementsMatch(t, []string{"seconds", "resolution", "video_input"}, keysOf(schema))
 		schema, examples := plugin.Meta.UsageForModel("doubao-seedance-1-5-pro-251215")
 		assert.ElementsMatch(t, []string{"tokens", "resolution", "generate_audio"}, keysOf(schema))
 		assert.Equal(t, "boolean", schema["generate_audio"].Type)
@@ -274,9 +274,9 @@ func TestDoubaoSeedanceUsageFacts(t *testing.T) {
 	}{
 		{[]string{pro10, "doubao-seedance-1-0-lite-t2v", "doubao-seedance-1-0-lite-i2v"}, []string{"480p", "720p", "1080p"}, []string{"resolution", "tokens"}},
 		{[]string{pro15}, []string{"480p", "720p", "1080p"}, []string{"generate_audio", "resolution", "tokens"}},
-		{[]string{v20}, []string{"480p", "720p", "1080p", "4k"}, []string{"resolution", "tokens", "video_input"}},
-		{[]string{fast20, mini20}, []string{"480p", "720p"}, []string{"resolution", "tokens", "video_input"}},
-		{[]string{v25}, []string{"480p", "720p", "1080p"}, []string{"resolution", "tokens", "video_input"}},
+		{[]string{v20}, []string{"480p", "720p", "1080p", "4k"}, []string{"resolution", "seconds", "video_input"}},
+		{[]string{fast20, mini20}, []string{"480p", "720p"}, []string{"resolution", "seconds", "video_input"}},
+		{[]string{v25}, []string{"480p", "720p", "1080p"}, []string{"resolution", "seconds", "video_input"}},
 	}
 	profiled := make([]string, 0, len(plugin.Meta.Models))
 	for _, family := range families {
@@ -314,13 +314,16 @@ func TestDoubaoSeedanceUsageFacts(t *testing.T) {
 		{"1.5 pro silent output", pro15, map[string]any{"metadata": map[string]any{"resolution": "720p", "generate_audio": false}},
 			map[string]any{"tokens": float64(108000), "resolution": "720p", "generate_audio": false}, ""},
 		{"2.0 has no audio fact", v20, map[string]any{"metadata": map[string]any{"resolution": "720p", "generate_audio": false}},
-			map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"}, ""},
+			map[string]any{"seconds": float64(5), "resolution": "720p", "video_input": "none"}, ""},
 		{"2.0 offers 4k", v20, map[string]any{"metadata": map[string]any{"resolution": "4k"}},
-			map[string]any{"tokens": float64(972000), "resolution": "4k", "video_input": "none"}, ""},
+			map[string]any{"seconds": float64(5), "resolution": "4k", "video_input": "none"}, ""},
 		{"1.0 pro has no reference video fact", pro10, map[string]any{"metadata": map[string]any{"resolution": "1080p"}},
 			map[string]any{"tokens": float64(243000), "resolution": "1080p"}, ""},
-		{"mini reserves its highest tier when the resolution is left to Ark", mini20, map[string]any{},
-			map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"}, ""},
+		{"2.5 top level resolution", v25, map[string]any{"resolution": "720p"}, map[string]any{"seconds": float64(5), "resolution": "720p", "video_input": "none"}, ""},
+		{"invalid video size", v25, map[string]any{"size": "fooxbar"}, nil, "seedance resolution is required"},
+		{"frames cannot override paid seconds", v25, map[string]any{"metadata": map[string]any{"resolution": "720p", "frames": 240}}, nil, "requires duration, not frames"},
+		{"oversized duration", v25, map[string]any{"seconds": 3601, "resolution": "720p"}, nil, "duration must be between"},
+		{"mini requires an explicit paid resolution", mini20, map[string]any{}, nil, "seedance resolution is required"},
 		{"mini rejects 1080p", mini20, map[string]any{"metadata": map[string]any{"resolution": "1080p"}}, nil, mini20 + " resolution must be one of 480p, 720p"},
 		{"mini rejects a 1080p size", mini20, map[string]any{"size": "1920x1080"}, nil, mini20 + " resolution must be one of 480p, 720p"},
 		{"fast rejects 4k", fast20, map[string]any{"metadata": map[string]any{"resolution": "4k"}}, nil, fast20 + " resolution must be one of 480p, 720p"},
@@ -369,7 +372,7 @@ func TestDoubaoSeedanceUsageFacts(t *testing.T) {
 		}{
 			{mini20, "1080p", map[string]any{"tokens": float64(90000)}},
 			{v25, "4k", map[string]any{"tokens": float64(90000)}},
-			{v20, "4k", map[string]any{"tokens": float64(90000), "resolution": "4k"}},
+			{v20, "4k", map[string]any{"tokens": float64(90000)}},
 		} {
 			queryContext := map[string]any{"model": tc.model, "upstreamModel": tc.model, "action": "text_to_video"}
 			body := map[string]any{

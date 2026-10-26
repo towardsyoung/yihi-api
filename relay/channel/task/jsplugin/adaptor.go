@@ -143,6 +143,15 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	return nil
 }
 
+func (a *TaskAdaptor) RequiresOwnBillingExpression(info *relaycommon.RelayInfo) bool {
+	if a.plugin.Meta.Key != "doubao" {
+		return false
+	}
+	schema, _ := a.plugin.Meta.UsageForModels(info.UpstreamModelName, info.OriginModelName)
+	_, perSecond := schema["seconds"]
+	return perSecond
+}
+
 func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
 	ratios, err := a.EstimateBillingValidated(c, info)
 	if err != nil {

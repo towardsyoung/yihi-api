@@ -376,8 +376,10 @@ func updatePricing() {
 				pricing.BillingMode = billingMode
 				pricing.BillingExpr = expr
 			}
-		} else if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.Declared != "" {
-			if tailMode := billing_setting.GetBillingMode(target.Declared); tailMode == "tiered_expr" {
+		} else if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.Declared != "" && !target.SeedanceUpscale {
+			schema, _ := TaskAliasUsage(pluginGeneration, target)
+			_, perSecond := schema["seconds"]
+			if tailMode := billing_setting.GetBillingMode(target.Declared); tailMode == "tiered_expr" && !(target.PluginKey == "doubao" && perSecond) {
 				if expr, ok := billing_setting.GetBillingExpr(target.Declared); ok && strings.TrimSpace(expr) != "" {
 					pricing.BillingMode = tailMode
 					pricing.BillingExpr = expr
@@ -394,6 +396,9 @@ func updatePricing() {
 		}
 		if ok && plugin != nil {
 			usageSchema, usageExamples := plugin.Meta.UsageForModel(usageModel)
+			if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.SeedanceUpscale {
+				usageSchema, usageExamples = TaskAliasUsage(pluginGeneration, target)
+			}
 			pricing.BillingUsageSchema = jsplugin.CloneUsageSchema(usageSchema)
 			pricing.BillingUsageExamples = jsplugin.CloneUsageExamples(usageExamples)
 		}

@@ -133,3 +133,9 @@ type TaskValidatedBillingProvider interface {
 type TaskValidatedUsageFactsProvider interface {
 	ExtractUsageFactsValidated(c *gin.Context, info *relaycommon.RelayInfo) (map[string]any, error)
 }
+
+// TaskOwnExpressionProvider prevents mapped upstream prices or legacy ratios
+// from replacing a product's explicitly configured task expression.
+type TaskOwnExpressionProvider interface {
+	RequiresOwnBillingExpression(info *relaycommon.RelayInfo) bool
+}

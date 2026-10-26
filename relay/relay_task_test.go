@@ -13,7 +13,9 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
+	builtinplugins "github.com/QuantumNous/new-api/plugins"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -464,6 +466,91 @@ export function parseTaskResult() { return {status:"SUCCESS"}; }
 			require.NotNil(t, result)
 			assert.Equal(t, "job-42", result.UpstreamTaskID)
 			assert.JSONEq(t, `{"status":`+strconv.Itoa(tc.status)+`}`, string(result.TaskData))
+		})
+	}
+}
+
+func TestSeedanceOwnExpressionSubmission(t *testing.T) {
+	service.InitHttpClient()
+	source, err := builtinplugins.Source("doubao")
+	require.NoError(t, err)
+	registry := pluginruntime.NewRegistry()
+	plugin, err := registry.Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	const original = "doubao-seedance-2-5-260628"
+	const cheap = "doubao-seedance-2-5-cheap"
+	for _, tc := range []struct {
+		name, client string
+		ownPrice     bool
+		wantCost     float64
+	}{
+		{"original price", original, true, 1.5},
+		{"cheap own price", cheap, true, 1.2},
+		{"cheap cannot inherit original price", cheap, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saveBillingConfig(t)
+			modes := map[string]string{original: "tiered_expr"}
+			expressions := map[string]string{original: `tier("720p", u("seconds") * 0.15)`}
+			if tc.client == cheap && tc.ownPrice {
+				modes[cheap] = "tiered_expr"
+				expressions[cheap] = `tier("720p", u("seconds") * 0.12)`
+			}
+			modeJSON, err := common.Marshal(modes)
+			require.NoError(t, err)
+			exprJSON, err := common.Marshal(expressions)
+			require.NoError(t, err)
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"billing_setting.billing_mode": string(modeJSON), "billing_setting.billing_expr": string(exprJSON), "billing_setting.plugin_billing_expr": "{}"}))
+			var received map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				require.NoError(t, common.DecodeJson(req.Body, &received))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"seedance-test-job"}`))
+			}))
+			defer server.Close()
+			mapping := ""
+			settings := kitdto.ChannelOtherSettings{}
+			if tc.client == cheap {
+				settings.SeedanceUpscale = map[string]kitdto.SeedanceUpscaleModelConfig{cheap: {Enabled: true, MapModel: original, Groups: []string{"default"}, Rules: map[string]kitdto.SeedanceUpscaleRuleConfig{"720p": {SeedanceResolution: "480p", UpscaleResolution: "720p"}}, Upscale: kitdto.SeedanceUpscaleProviderConfig{APIKey: "test-only"}}}
+				mapping = `{"` + cheap + `":"` + original + `"}`
+			}
+			c, info := newTaskSubmitContext(t, tc.client, mapping)
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+			common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, settings)
+			common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeDoubaoVideo)
+			c.Set(pluginruntime.ContextKeyPinnedPlugin, pluginruntime.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()})
+			c.Set("task_request", map[string]any{"model": tc.client, "prompt": "landscape", "seconds": 10, "metadata": map[string]any{"resolution": "720p"}})
+			c.Set("group", "default")
+			info.UserGroup, info.UsingGroup, info.OriginModelName = "default", "default", tc.client
+			info.Billing = &imageReservation{limit: 1 << 30}
+			result, taskErr := RelayTaskSubmit(c, info)
+			if !tc.ownPrice {
+				require.NotNil(t, taskErr)
+				assert.Equal(t, "model_price_error", taskErr.Code)
+				assert.Nil(t, received, "missing product price must fail before calling upstream")
+				return
+			}
+			require.Nil(t, taskErr, "%+v", taskErr)
+			require.NotNil(t, result)
+			assert.Equal(t, common.QuotaRound(tc.wantCost*common.QuotaPerUnit), result.Quota)
+			assert.Equal(t, original, received["model"])
+			assert.Equal(t, float64(10), received["duration"])
+			expectedResolution := "720p"
+			if tc.client == cheap {
+				expectedResolution = "480p"
+				require.NotNil(t, result.PrivateDataPatch.Upscale)
+				assert.Equal(t, "720p", result.PrivateDataPatch.Upscale.TargetResolution)
+			}
+			assert.Equal(t, expectedResolution, received["resolution"])
+			require.NotNil(t, info.TieredBillingSnapshot)
+			assert.Equal(t, tc.client, info.TieredBillingSnapshot.ModelName)
+			assert.Equal(t, "720p", info.TieredBillingSnapshot.UsageFacts["resolution"])
+			assert.Empty(t, info.PriceData.OtherRatios())
+			// Later price edits must not change the already submitted job's charge.
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"billing_setting.billing_expr": "{}"}))
+			settled, _, err := service.EvaluateTaskCompletionUsage(info.TieredBillingSnapshot, nil)
+			require.NoError(t, err)
+			assert.Equal(t, result.Quota, settled.ActualQuotaAfterGroup)
 		})
 	}
 }

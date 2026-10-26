@@ -532,10 +532,31 @@ func (channel *Channel) GetBaseURL() string {
 }
 
 func (channel *Channel) GetModelMapping() string {
-	if channel.ModelMapping == nil {
-		return ""
+	raw := ""
+	if channel.ModelMapping != nil {
+		raw = *channel.ModelMapping
 	}
-	return *channel.ModelMapping
+	settings := channel.GetOtherSettings()
+	if len(settings.SeedanceUpscale) == 0 {
+		return raw
+	}
+	mapping := make(map[string]string)
+	if raw != "" && common.UnmarshalJsonStr(raw, &mapping) != nil {
+		return raw
+	}
+	if mapping == nil {
+		mapping = make(map[string]string)
+	}
+	for name, cfg := range settings.SeedanceUpscale {
+		if mapped := strings.TrimSpace(cfg.MapModel); mapped != "" {
+			mapping[name] = mapped
+		}
+	}
+	data, err := common.Marshal(mapping)
+	if err != nil {
+		return raw
+	}
+	return string(data)
 }
 
 func (channel *Channel) GetStatusCodeMapping() string {
@@ -1007,6 +1028,40 @@ func (channel *Channel) ValidateSettings() error {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, channelOtherSettings)
 		if err != nil {
 			return err
+		}
+	}
+	if len(channelOtherSettings.SeedanceUpscale) > 0 {
+		mapping := make(map[string]string)
+		if channel.ModelMapping != nil && *channel.ModelMapping != "" {
+			if err := common.UnmarshalJsonStr(*channel.ModelMapping, &mapping); err != nil {
+				return err
+			}
+		}
+		for name, cfg := range channelOtherSettings.SeedanceUpscale {
+			if mapped, exists := mapping[name]; exists && mapped != strings.TrimSpace(cfg.MapModel) {
+				return fmt.Errorf("conflicting model_mapping and seedance_upscale for %s", name)
+			}
+			if !cfg.Enabled {
+				continue
+			}
+			if strings.TrimSpace(cfg.MapModel) == "" || len(cfg.Rules) == 0 {
+				return fmt.Errorf("seedance_upscale %s requires map_model and rules", name)
+			}
+			for resolution, rule := range cfg.Rules {
+				if resolution != "480p" && resolution != "720p" && resolution != "1080p" {
+					return fmt.Errorf("invalid seedance target resolution %s", resolution)
+				}
+				if rule.SeedanceResolution != "480p" && rule.SeedanceResolution != "720p" && rule.SeedanceResolution != "1080p" {
+					return fmt.Errorf("invalid seedance source resolution for %s", name)
+				}
+				if rule.UpscaleResolution == "" {
+					if rule.SeedanceResolution != resolution {
+						return fmt.Errorf("seedance rule %s must deliver its requested resolution", resolution)
+					}
+				} else if rule.UpscaleResolution != resolution || strings.TrimSpace(cfg.Upscale.APIKey) == "" || (cfg.Upscale.Provider != "" && cfg.Upscale.Provider != "doubao") {
+					return fmt.Errorf("invalid seedance upscale configuration for %s", name)
+				}
+			}
 		}
 	}
 	if err := channelOtherSettings.ValidateToolLossPolicy(); err != nil {

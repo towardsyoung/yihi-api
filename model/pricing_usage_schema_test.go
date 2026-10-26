@@ -2,6 +2,13 @@ package model
 
 import (
 	"fmt"
+	builtinplugins "github.com/QuantumNous/new-api/plugins"
+	"github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -309,4 +316,82 @@ func TestPricingSharedPluginVariantsUseEachSchemaAndExpression(t *testing.T) {
 	encoded, err := common.Marshal(single)
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), "billing_plugin_variants")
+}
+
+func TestSeedanceUpscaleAliasPricingDatabases(t *testing.T) {
+	const origin = "doubao-seedance-2-5-260628"
+	const cheap = "doubao-seedance-2-5-cheap"
+	source, err := builtinplugins.Source("doubao")
+	require.NoError(t, err)
+	registry := jsplugin.DefaultRegistry
+	t.Cleanup(func() { registry.Unregister("doubao") })
+	_, err = registry.Register(source, jsplugin.Options{})
+	require.NoError(t, err)
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var driver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				driver = sqlite.Open(filepath.Join(t.TempDir(), "seedance.db"))
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN not configured")
+				}
+				driver = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN not configured")
+				}
+				driver = postgres.Open(dsn)
+			}
+			db, err := gorm.Open(driver, &gorm.Config{})
+			require.NoError(t, err)
+			conn, err := db.DB()
+			require.NoError(t, err)
+			defer conn.Close()
+			previousDB := DB
+			DB = db
+			defer func() { DB = previousDB; taskAliasViewPtr.Store(nil) }()
+			require.NoError(t, db.AutoMigrate(&Channel{}))
+			defer db.Migrator().DropTable(&Channel{})
+			var version string
+			if dialect == "sqlite" {
+				require.NoError(t, db.Raw("select sqlite_version()").Scan(&version).Error)
+			} else {
+				require.NoError(t, db.Raw("select version()").Scan(&version).Error)
+			}
+			t.Logf("%s version: %s", dialect, version)
+			channel := &Channel{Type: 54, Key: "test", Name: "seedance-test", Models: cheap, Status: common.ChannelStatusEnabled}
+			channel.SetOtherSettings(dto.ChannelOtherSettings{SeedanceUpscale: map[string]dto.SeedanceUpscaleModelConfig{
+				cheap: {Enabled: true, MapModel: origin, Groups: []string{"yihi_default"}, Rules: map[string]dto.SeedanceUpscaleRuleConfig{
+					"480p":  {SeedanceResolution: "480p"},
+					"720p":  {SeedanceResolution: "480p", UpscaleResolution: "720p"},
+					"1080p": {SeedanceResolution: "720p", UpscaleResolution: "1080p"},
+				}, Upscale: dto.SeedanceUpscaleProviderConfig{Provider: "doubao", APIKey: "test-only", MaxRetries: 3}},
+			}})
+			require.NoError(t, channel.ValidateSettings())
+			require.NoError(t, db.Create(channel).Error)
+			for range 2 {
+				var loaded Channel
+				require.NoError(t, db.First(&loaded, channel.Id).Error)
+				assert.Nil(t, loaded.ModelMapping, "derived mapping must not be persisted")
+				assert.JSONEq(t, `{"`+cheap+`":"`+origin+`"}`, loaded.GetModelMapping())
+				taskAliasViewPtr.Store(nil)
+				target, ok := ResolveTaskModelAlias(registry.Generation(), cheap)
+				require.True(t, ok)
+				assert.Equal(t, origin, target.Declared)
+				assert.True(t, target.SeedanceUpscale)
+				schema, _ := TaskAliasUsage(registry.Generation(), target)
+				assert.Equal(t, "second", schema["seconds"].Unit)
+				assert.ElementsMatch(t, []string{"480p", "720p", "1080p"}, schema["resolution"].Enum)
+				expression := `u("resolution") == "720p" ? tier("720p", u("seconds") * 0.12) : tier("other", u("seconds") * 0.22)`
+				require.NoError(t, validateModelPricing(cheap, PricingValues{"billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": expression}, PricingValues{}))
+			}
+			conflicting := `{"` + cheap + `":"different-model"}`
+			channel.ModelMapping = &conflicting
+			require.ErrorContains(t, channel.ValidateSettings(), "conflicting")
+		})
+	}
 }

@@ -263,7 +263,18 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if pinnedPlugin.Plugin != nil {
 		pluginKey = pinnedPlugin.Plugin.Meta.Key
 	}
-	exprStr, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, info.UpstreamModelName)
+	mappedPriceModel := info.UpstreamModelName
+	ownExpression := false
+	if provider, ok := adaptor.(channel.TaskOwnExpressionProvider); ok {
+		ownExpression = provider.RequiresOwnBillingExpression(info)
+	}
+	if ownExpression {
+		mappedPriceModel = ""
+	}
+	exprStr, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, mappedPriceModel)
+	if ownExpression && (!exists || !billingexpr.UsedUsageKeys(exprStr)["seconds"]) {
+		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("model %s must configure its own task billing expression", modelName), "model_price_error", http.StatusBadRequest)
+	}
 	paidBailian := pluginKey == "alibaba" && (info.UpstreamModelName == "qwen-audio-3.1-tts-next" || info.UpstreamModelName == "pixverse/pixverse-lipsync")
 	if paidBailian && strings.TrimSpace(c.GetHeader("Idempotency-Key")) == "" {
 		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("Idempotency-Key is required for paid media generation"), "invalid_idempotency_key", http.StatusBadRequest)

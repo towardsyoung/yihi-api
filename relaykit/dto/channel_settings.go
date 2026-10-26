@@ -692,7 +692,8 @@ type SeedanceUpscaleModelConfig struct {
 type SeedanceUpscaleRuleConfig struct {
 	SeedanceResolution string `json:"seedance_resolution,omitempty"`
 	UpscaleResolution  string `json:"upscale_resolution,omitempty"`
-	BillingModel       string `json:"billing_model,omitempty"`
+	// Deprecated: retained for old channel JSON; new requests bill the client model.
+	BillingModel string `json:"billing_model,omitempty"`
 }
 
 type SeedanceUpscaleProviderConfig struct {

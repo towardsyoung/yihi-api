@@ -14,9 +14,10 @@ import (
 // Declared is empty when the same plugin resolves the alias to more than one
 // declared tail (display-only; pin is disabled).
 type TaskAliasTarget struct {
-	Alias     string
-	Declared  string
-	PluginKey string
+	Alias           string
+	Declared        string
+	PluginKey       string
+	SeedanceUpscale bool
 }
 
 type taskAliasView struct {
@@ -74,8 +75,9 @@ func rebuildTaskAliasView() {
 }
 
 type taskAliasDraft struct {
-	spellings []string
-	byPlugin  map[string]map[string]struct{}
+	spellings       []string
+	byPlugin        map[string]map[string]struct{}
+	seedanceUpscale bool
 }
 
 func buildTaskAliasView(generation *jsplugin.RoutingGeneration) *taskAliasView {
@@ -93,7 +95,7 @@ func buildTaskAliasView(generation *jsplugin.RoutingGeneration) *taskAliasView {
 	}
 
 	var channels []Channel
-	err := DB.Select("id", "type", "models", "model_mapping").
+	err := DB.Select("id", "type", "models", "model_mapping", "settings").
 		Where("status = ?", common.ChannelStatusEnabled).
 		Find(&channels).Error
 	if err != nil {
@@ -146,6 +148,9 @@ func buildTaskAliasView(generation *jsplugin.RoutingGeneration) *taskAliasView {
 				draft = &taskAliasDraft{byPlugin: make(map[string]map[string]struct{})}
 				drafts[fold] = draft
 			}
+			if _, configured := channel.GetOtherSettings().SeedanceUpscale[alias]; configured {
+				draft.seedanceUpscale = true
+			}
 			draft.spellings = append(draft.spellings, alias)
 			declareds := draft.byPlugin[plugin.Meta.Key]
 			if declareds == nil {
@@ -181,12 +186,34 @@ func buildTaskAliasView(generation *jsplugin.RoutingGeneration) *taskAliasView {
 			}
 		}
 		view.byFold[jsplugin.ASCIIFold(alias)] = TaskAliasTarget{
-			Alias:     alias,
-			Declared:  declared,
-			PluginKey: pluginKey,
+			Alias:           alias,
+			Declared:        declared,
+			PluginKey:       pluginKey,
+			SeedanceUpscale: draft.seedanceUpscale,
 		}
 	}
 	return view
+}
+
+// TaskAliasUsage exposes the product's deliverable tiers, not the base
+// generator's tiers (a 720p generator can deliver a 1080p upscale product).
+func TaskAliasUsage(g *jsplugin.RoutingGeneration, target TaskAliasTarget) (map[string]jsplugin.UsageFieldSchema, []jsplugin.UsageExample) {
+	plugin, ok := g.Get(target.PluginKey)
+	if !ok {
+		return nil, nil
+	}
+	schema, examples := plugin.Meta.UsageForModel(target.Declared)
+	if !target.SeedanceUpscale {
+		return schema, examples
+	}
+	schema = jsplugin.CloneUsageSchema(schema)
+	delete(schema, "tokens")
+	delete(schema, "generate_audio")
+	schema["seconds"] = jsplugin.UsageFieldSchema{Type: "number", Unit: "second", Description: jsplugin.LocalizedText{"en": "Video generation unit price", "zh": "视频生成单价"}}
+	resolution := schema["resolution"]
+	resolution.Enum = []string{"480p", "720p", "1080p"}
+	schema["resolution"] = resolution
+	return schema, nil
 }
 
 // followChannelModelMapping walks one channel's mapping the same way

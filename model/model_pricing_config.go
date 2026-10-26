@@ -274,8 +274,8 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 		if plugin, ok := generation.GetByModel(name); ok {
 			entry.UsageSchema, _ = plugin.Meta.UsageForModel(name)
 		} else if target, ok := ResolveTaskModelAlias(generation, name); ok {
-			if plugin, ok := generation.Get(target.PluginKey); ok {
-				entry.UsageSchema, _ = plugin.Meta.UsageForModel(target.Declared)
+			if _, ok := generation.Get(target.PluginKey); ok {
+				entry.UsageSchema, _ = TaskAliasUsage(generation, target)
 			}
 		}
 		plugins := generation.PluginsByModel(name)
@@ -437,9 +437,9 @@ func validateModelPricing(name string, values, previous PricingValues) error {
 					}
 				}
 			} else if target, resolved := ResolveTaskModelAlias(generation, name); resolved {
-				if plugin, ok := generation.Get(target.PluginKey); ok {
+				if _, ok := generation.Get(target.PluginKey); ok {
 					if !unchanged || generation.SharedModel(target.Declared) {
-						schema, _ := plugin.Meta.UsageForModel(target.Declared)
+						schema, _ := TaskAliasUsage(generation, target)
 						err = billing_setting.SmokeTestTaskExpr(expression, schema)
 					}
 				} else {

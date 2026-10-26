@@ -8,15 +8,15 @@ const VIDEO_MODELS = {
   "doubao-seedance-1-0-lite-t2v": { resolutions: ["480p", "720p", "1080p"] },
   "doubao-seedance-1-0-lite-i2v": { resolutions: ["480p", "720p", "1080p"] },
   "doubao-seedance-1-5-pro-251215": { resolutions: ["480p", "720p", "1080p"], audio: true },
-  "doubao-seedance-2-0-260128": { resolutions: ["480p", "720p", "1080p", "4k"], videoInput: true },
-  "doubao-seedance-2-0-fast-260128": { resolutions: ["480p", "720p"], videoInput: true },
-  "doubao-seedance-2-0-mini-260615": { resolutions: ["480p", "720p"], videoInput: true },
-  "doubao-seedance-2-5-260628": { resolutions: ["480p", "720p", "1080p"], videoInput: true },
+  "doubao-seedance-2-0-260128": { resolutions: ["480p", "720p", "1080p", "4k"], videoInput: true, perSecond: true },
+  "doubao-seedance-2-0-fast-260128": { resolutions: ["480p", "720p"], videoInput: true, perSecond: true },
+  "doubao-seedance-2-0-mini-260615": { resolutions: ["480p", "720p"], videoInput: true, perSecond: true },
+  "doubao-seedance-2-5-260628": { resolutions: ["480p", "720p", "1080p"], videoInput: true, perSecond: true },
 };
 // Every Ark resolution tier; an endpoint ID reached through channel mapping
 // without a declared profile keeps them all.
 const SEEDANCE_RESOLUTIONS = ["480p", "720p", "1080p", "4k"];
-const DEFAULT_VIDEO_PROFILE = { resolutions: SEEDANCE_RESOLUTIONS, videoInput: true };
+const DEFAULT_VIDEO_PROFILE = { resolutions: SEEDANCE_RESOLUTIONS, videoInput: true, perSecond: true };
 
 // Protocol capabilities from the Ark image generation API reference, not prices.
 // presets: accepted `size` resolution tiers; minPixels/maxPixels bound `WxH` sizes.
@@ -185,7 +185,11 @@ function seedanceUsageSchema(profile) {
       description: { en: "Output video resolution", zh: "输出视频分辨率" },
     },
   };
-  // Whether the request includes reference video input; Seedance 2.x prices video-to-video tokens at a lower unit rate.
+  if (profile.perSecond) {
+    delete schema.tokens;
+    schema.seconds = { type: "number", unit: "second", description: { en: "Video generation unit price", zh: "视频生成单价" } };
+  }
+  // Whether the request includes reference video input; the expression defines its price.
   if (profile.videoInput) {
     schema.video_input = {
       enum: ["none", "video"],
@@ -216,7 +220,9 @@ function seedanceUsageExamples(profile) {
   if (profile.videoInput) specs.push({ label: "720p · 5s (+4s 输入视频)", resolution: "720p", seconds: 9, video_input: "video" });
   if (profile.audio) specs.push({ label: "720p · 5s · 无声", resolution: "720p", seconds: 5, generate_audio: false });
   return specs.map((spec) => {
-    const facts = { tokens: Math.round(estimateTokens(spec.seconds, spec.resolution)), resolution: spec.resolution };
+    const facts = { resolution: spec.resolution };
+    if (profile.perSecond) facts.seconds = 5;
+    else facts.tokens = Math.round(estimateTokens(spec.seconds, spec.resolution));
     if (profile.videoInput) facts.video_input = spec.video_input || "none";
     if (profile.audio) facts.generate_audio = spec.generate_audio !== false;
     return { label: spec.label, facts: facts };
@@ -228,7 +234,11 @@ function seedanceUsageProfiles() {
   const profiles = [];
   for (const model of Object.keys(VIDEO_MODELS)) {
     const capability = VIDEO_MODELS[model];
-    const shape = capability.resolutions.join("/") + (capability.videoInput ? "+video" : "") + (capability.audio ? "+audio" : "");
+    const shape =
+      capability.resolutions.join("/") +
+      (capability.videoInput ? "+video" : "") +
+      (capability.audio ? "+audio" : "") +
+      (capability.perSecond ? "+seconds" : "");
     let profile = profiles.find((entry) => entry.shape === shape);
     if (!profile) {
       profile = { shape: shape, models: [], schema: seedanceUsageSchema(capability), examples: seedanceUsageExamples(capability) };
@@ -248,7 +258,7 @@ export const meta = {
     en: "Volcengine Doubao Seedance video generation and Seedream image generation",
     zh: "火山引擎豆包 Seedance 视频生成与 Seedream 图片生成",
   },
-  version: "1.2.0",
+  version: "1.3.0",
   author: { name: "QuantumNous" },
   channelTypes: [54, 45], // VolcEngine-type channels serve Ark video models with the same wire format
   models: Object.keys(VIDEO_MODELS).concat(Object.keys(IMAGE_MODELS)),
@@ -358,16 +368,15 @@ function videoProfile(ctx) {
   return DEFAULT_VIDEO_PROFILE;
 }
 
-// Resolution tier the reservation is estimated at: the requested tier or the
-// tier of a WxH size, rejecting tiers the model does not offer. A request that
-// leaves the resolution to Ark reserves the model's highest tier up to 1080p;
-// completion overlays the delivered resolution.
+// Per-second products require an explicit purchased tier or WxH size. Legacy
+// token products can reserve the highest tier and settle the delivered tier.
 function videoResolution(ctx) {
   const req = ctx.requestBody || {};
   const metadata = req.metadata || {};
   const profile = videoProfile(ctx);
-  const raw = trimmed(metadata.resolution || req.size).toLowerCase();
-  const recognized = SEEDANCE_RESOLUTIONS.includes(raw) || raw.replace("*", "x").split("x").length === 2;
+  const raw = trimmed(req.resolution || metadata.resolution || req.size).toLowerCase();
+  const recognized = SEEDANCE_RESOLUTIONS.includes(raw) || /^[1-9][0-9]*[x*][1-9][0-9]*$/.test(raw);
+  if (!recognized && profile.perSecond) throw new Error("seedance resolution is required and must be supported by the model");
   if (!recognized) return profile.resolutions.includes("1080p") ? "1080p" : profile.resolutions[profile.resolutions.length - 1];
   const resolution = normalizeResolution(raw);
   if (!profile.resolutions.includes(resolution))
@@ -386,26 +395,20 @@ function resolutionMaxPixels(resolution) {
   return [1280, 720];
 }
 
+// A per-second product sells the explicit requested duration, never an estimate.
+function seedanceSeconds(req) {
+  const metadata = req.metadata || {};
+  if (metadata.frames !== undefined) throw new Error("seedance per-second pricing requires duration, not frames");
+  const value = req.seconds !== undefined ? req.seconds : req.duration !== undefined ? req.duration : metadata.duration;
+  if (typeof value !== "number" && typeof value !== "string") throw new Error("seedance duration is required");
+  const seconds = Number(value);
+  if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 3600) throw new Error("seedance duration must be between 1 and 3600 seconds");
+  return seconds;
+}
+
 function estimateTokens(seconds, resolution) {
   const dims = resolutionMaxPixels(resolution);
   return (seconds * dims[0] * dims[1] * 24) / 1024;
-}
-
-function videoInputRatio(model, resolution, content) {
-  const video = hasVideo(content);
-  const res = trimmed(resolution).toLowerCase();
-  if (model === "doubao-seedance-2-5-260628") {
-    if (res === "1080p") return video ? 7.0 / 10.7 : 11.7 / 10.7;
-    return video ? 42 / 70 : 1;
-  }
-  if (model === "doubao-seedance-2-0-260128") {
-    if (res === "1080p") return video ? 31 / 46 : 51 / 46;
-    if (res === "4k") return video ? 16 / 46 : 26 / 46;
-    return video ? 28 / 46 : 1;
-  }
-  if (model === "doubao-seedance-2-0-fast-260128") return video ? 22 / 37 : 1;
-  if (model === "doubao-seedance-2-0-mini-260615") return video ? 14 / 23 : 1;
-  return 1;
 }
 
 // Channel model mapping may send a declared Seedream model to an Ark endpoint
@@ -769,6 +772,10 @@ export function buildSubmitRequest(ctx) {
   if (Array.isArray(body.content)) body.content = rewriteDraftTaskContent(body.content, ctx.originTasks);
   const seconds = Number.parseInt(req.seconds || "", 10);
   if (seconds > 0) body.duration = seconds;
+  if (videoProfile(ctx).perSecond) {
+    body.duration = seedanceSeconds(req);
+    body.resolution = videoResolution(ctx);
+  }
   body.model = ctx.upstreamModel || body.model;
   return {
     url: apiRoot(ctx) + "/api/v3/contents/generations/tasks",
@@ -808,10 +815,7 @@ export function extractUsage(ctx) {
   }
   const req = ctx.requestBody || {};
   const metadata = req.metadata || {};
-  if (ctx.usagePurpose === "billing_ratios") {
-    const ratio = videoInputRatio(ctx.upstreamModel || ctx.model, metadata.resolution, metadata.content);
-    return ratio === 1 ? null : { video_input_ratio: ratio };
-  }
+  if (ctx.usagePurpose === "billing_ratios") return null;
   let seconds = Number(req.seconds || req.duration || metadata.duration || 0);
   if (!Number.isFinite(seconds) || seconds <= 0) {
     const frames = Number(metadata.frames);
@@ -822,6 +826,10 @@ export function extractUsage(ctx) {
   const profile = videoProfile(ctx);
   const resolution = videoResolution(ctx);
   const facts = { tokens: estimateTokens(seconds, resolution), resolution: resolution };
+  if (profile.perSecond) {
+    delete facts.tokens;
+    facts.seconds = seedanceSeconds(req);
+  }
   if (profile.videoInput) facts.video_input = hasVideo(metadata.content) ? "video" : "none";
   if (profile.audio) facts.generate_audio = metadata.generate_audio !== false;
   return facts;
@@ -916,7 +924,7 @@ export function extractUsageOnComplete(task, taskResult, body) {
   if (Number.isFinite(tokens) && tokens > 0) facts.tokens = tokens;
   const content = body.content || {};
   const resolution = trimmed(content.resolution || body.resolution).toLowerCase();
-  if (videoProfile(task).resolutions.includes(resolution)) facts.resolution = resolution;
+  if (!videoProfile(task).perSecond && videoProfile(task).resolutions.includes(resolution)) facts.resolution = resolution;
   return facts;
 }
 
@@ -966,7 +974,10 @@ export const protocols = {
       if (!prompt && images.length === 0) throw new Error("input is required");
       const metadata = Object.assign({}, req.metadata || {});
       if (Object.prototype.hasOwnProperty.call(req, "resolution")) metadata.resolution = req.resolution;
-      else if (req.size && !metadata.resolution) metadata.resolution = normalizeResolution(req.size);
+      else if (req.size && !metadata.resolution) {
+        const size = trimmed(req.size).toLowerCase();
+        metadata.resolution = SEEDANCE_RESOLUTIONS.includes(size) || /^[1-9][0-9]*[x*][1-9][0-9]*$/.test(size) ? normalizeResolution(size) : size;
+      }
       const requestBody = { model: model, prompt: prompt, metadata: metadata };
       if (images.length) requestBody.images = images;
       if (Object.prototype.hasOwnProperty.call(req, "seconds")) requestBody.seconds = req.seconds;

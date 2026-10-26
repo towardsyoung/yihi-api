@@ -18,6 +18,12 @@ func TestSeedanceBillingFactors(t *testing.T) {
 		errMessage string
 	}{
 		{
+			name:       "rejects oversized metadata duration",
+			body:       &requestPayload{Duration: intValuePtr(relaycommon.MaxTaskDurationSeconds + 1), Resolution: "720p"},
+			wantErr:    true,
+			errMessage: "seedance duration must not exceed",
+		},
+		{
 			name:       "rejects missing explicit duration",
 			body:       &requestPayload{Resolution: "480p"},
 			wantErr:    true,
@@ -107,8 +113,8 @@ func TestConvertToRequestPayloadUsesTopLevelDurationForSeedanceBilling(t *testin
 }
 
 func TestSeedanceHelpers(t *testing.T) {
-	require.True(t, IsSeedanceFixedPriceModel("doubao-seedance-2-0-260128"))
-	require.True(t, IsSeedanceFixedPriceModel("doubao-seedance-2-0-fast-260128"))
+	require.False(t, IsSeedanceFixedPriceModel("doubao-seedance-2-0-260128"))
+	require.False(t, IsSeedanceFixedPriceModel("doubao-seedance-2-0-fast-260128"))
 	require.True(t, IsSeedanceFixedPriceModel("doubao-seedance-1-5-pro-251215"))
 
 	resolution, ratio, ok := NormalizeSeedanceResolution(" 720P ")
@@ -180,26 +186,18 @@ func TestConfiguredSeedanceUpscalePlan(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "doubao-seedance-2-0-260128", plan.UpstreamModelName)
-	require.Equal(t, "doubao-seedance-2-upscale-720p", plan.BillingModelName)
+	require.Equal(t, "doubao-seedance-2-0-260128-g1", plan.ExternalModelName)
 	require.Equal(t, "upscale-key-g1", plan.APIKey)
 	require.Equal(t, "480p", plan.SourceResolution)
-	require.Equal(t, "720p", plan.BillingResolution)
 	require.Equal(t, "720p", plan.TargetResolution)
 	require.Equal(t, 2, plan.MaxRetries)
-	factors, err := seedanceBillingFactors(&requestPayload{
-		Duration:   intValuePtr(6),
-		Resolution: plan.BillingResolution,
-	})
-	require.NoError(t, err)
-	require.Equal(t, 1.364, factors["resolution"])
 
 	plan, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g1", "1080p")
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "720p", plan.SourceResolution)
-	require.Equal(t, "1080p", plan.BillingResolution)
 	require.Equal(t, "1080p", plan.TargetResolution)
-	require.Equal(t, "doubao-seedance-2-upscale-1080p", plan.BillingModelName)
+	require.Equal(t, "doubao-seedance-2-0-260128-g1", plan.ExternalModelName)
 
 	plan, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g2", "720p")
 	require.NoError(t, err)
@@ -211,21 +209,20 @@ func TestConfiguredSeedanceUpscalePlan(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "ep-no-upscale", plan.UpstreamModelName)
-	require.Equal(t, "doubao-seedance-2-upscale-480p", plan.BillingModelName)
+	require.Equal(t, "doubao-seedance-2-0-260128-g3", plan.ExternalModelName)
 	require.Equal(t, "480p", plan.SourceResolution)
-	require.Equal(t, "480p", plan.BillingResolution)
 	require.Empty(t, plan.TargetResolution)
 	require.Empty(t, plan.APIKey)
 	require.Zero(t, plan.MaxRetries)
 
 	info.TokenGroup = "not-allowed"
 	_, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g1", "720p")
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.False(t, ok)
 
 	info.TokenGroup = "yihi-default"
 	_, ok, err = resolveConfiguredSeedanceUpscalePlan(info, "doubao-seedance-2-0-260128-g1", "480p")
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.False(t, ok)
 
 	info.TokenGroup = "yihi-default"
@@ -265,8 +262,8 @@ func TestBuildTaskPrivateDataPatchForSeedanceUpscale(t *testing.T) {
 
 	info := &relaycommon.RelayInfo{}
 	applySeedanceUpscalePlan(info, seedanceUpscalePlan{
-		BillingModelName: "doubao-seedance-2-upscale-480p",
-		SourceResolution: "480p",
+		ExternalModelName: "doubao-seedance-2-upscale-480p",
+		SourceResolution:  "480p",
 	})
 	require.Equal(t, "doubao-seedance-2-upscale-480p", info.BillingModelName)
 	require.Nil(t, info.VideoUpscale)

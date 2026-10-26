@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -119,38 +120,69 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *taskdto.TaskError) {
-	// Accept only POST /v1/video/generations as "generate" action.
-	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionImageToVideo); taskErr != nil {
+	// A protocol decoder may already have normalized Responses/native/video
+	// input. Preserve that canonical request instead of parsing the raw body again.
+	if value, exists := c.Get("task_request"); exists {
+		if body, ok := value.(map[string]any); ok {
+			body = maps.Clone(body)
+			if resolution, present := body["resolution"]; present {
+				metadata, _ := body["metadata"].(map[string]any)
+				metadata = maps.Clone(metadata)
+				if metadata == nil {
+					metadata = make(map[string]any)
+				}
+				metadata["resolution"] = resolution
+				body["metadata"] = metadata
+			}
+			if seconds, present := body["seconds"]; present {
+				body["seconds"] = fmt.Sprint(seconds)
+			}
+			data, err := common.Marshal(body)
+			if err != nil {
+				return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+			}
+			var req relaycommon.TaskSubmitReq
+			if err := common.Unmarshal(data, &req); err != nil {
+				return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+			}
+			c.Set("task_request", req)
+		}
+	} else if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionImageToVideo); taskErr != nil {
 		return taskErr
 	}
 	req, err := relaycommon.GetTaskRequest(c)
 	if err != nil {
 		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
 	}
-	modelName := req.Model
+	modelName := info.OriginModelName
 	if modelName == "" {
-		modelName = info.OriginModelName
+		modelName = req.Model
 	}
 	body, err := a.convertToRequestPayload(cloneTaskSubmitReqForBilling(&req))
 	if err != nil {
 		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
 	}
-	priceModelName := modelName
 	if plan, ok, err := resolveConfiguredSeedanceUpscalePlan(info, modelName, body.Resolution); err != nil {
 		return service.TaskErrorWrapperLocal(err, "invalid_seedance_upscale_config", http.StatusBadRequest)
 	} else if ok {
-		priceModelName = plan.BillingModelName
 		applySeedanceUpscalePlan(info, plan)
-		body.Resolution = plan.BillingResolution
-	} else if !IsSeedanceFixedPriceModel(modelName) {
-		return nil
 	}
-	if _, ok := ratio_setting.GetModelPrice(priceModelName, false); !ok {
-		return service.TaskErrorWrapperLocal(fmt.Errorf("seedance fixed-price model %s must configure ModelPrice", priceModelName), "model_price_error", http.StatusBadRequest)
+	if a.RequiresOwnBillingExpression(info) {
+		if _, err := a.ExtractUsageFactsValidated(c, info); err != nil {
+			return service.TaskErrorWrapperLocal(err, "invalid_seedance_billing_params", http.StatusBadRequest)
+		}
+	} else if IsSeedanceFixedPriceModel(modelName) {
+		if _, ok := ratio_setting.GetModelPrice(modelName, false); !ok {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("seedance fixed-price model %s must configure ModelPrice", modelName), "model_price_error", http.StatusBadRequest)
+		}
+		if _, err := seedanceBillingFactors(body); err != nil {
+			return service.TaskErrorWrapperLocal(err, "invalid_seedance_billing_params", http.StatusBadRequest)
+		}
 	}
-	if _, err := seedanceBillingFactors(body); err != nil {
-		return service.TaskErrorWrapperLocal(err, "invalid_seedance_billing_params", http.StatusBadRequest)
+	if info.Action == "" {
+		info.Action = constant.TaskActionImageToVideo
 	}
+
 	return nil
 }
 
@@ -167,32 +199,66 @@ func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *r
 	return nil
 }
 
-// EstimateBilling returns fixed-price multipliers for Seedance models.
+// RequiresOwnBillingExpression keeps each configured product independently priced.
+func (a *TaskAdaptor) RequiresOwnBillingExpression(info *relaycommon.RelayInfo) bool {
+	if info.ChannelMeta != nil {
+		if _, configured := info.ChannelOtherSettings.SeedanceUpscale[info.OriginModelName]; configured {
+			return true
+		}
+	}
+	switch info.OriginModelName {
+	case "doubao-seedance-2-0-260128", "doubao-seedance-2-0-fast-260128", "doubao-seedance-2-0-mini-260615", "doubao-seedance-2-5-260628":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *TaskAdaptor) ExtractUsageFacts(c *gin.Context, info *relaycommon.RelayInfo) map[string]any {
+	facts, _ := a.ExtractUsageFactsValidated(c, info)
+	return facts
+}
+
+func (a *TaskAdaptor) ExtractUsageFactsValidated(c *gin.Context, info *relaycommon.RelayInfo) (map[string]any, error) {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil, err
+	}
+	body, err := a.convertToRequestPayload(cloneTaskSubmitReqForBilling(&req))
+	if err != nil {
+		return nil, err
+	}
+	if body.Frames != nil {
+		return nil, fmt.Errorf("seedance per-second pricing requires duration, not frames")
+	}
+	if body.Duration == nil || int(*body.Duration) <= 0 || int(*body.Duration) > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("seedance duration must be between 1 and %d seconds", relaycommon.MaxTaskDurationSeconds)
+	}
+	resolution, _, ok := NormalizeSeedanceResolution(body.Resolution)
+	if !ok {
+		return nil, fmt.Errorf("seedance resolution must be 480p, 720p, or 1080p")
+	}
+	videoInput := "none"
+	if hasVideoInContent(body.Content) {
+		videoInput = "video"
+	}
+	return map[string]any{"seconds": float64(*body.Duration), "resolution": resolution, "video_input": videoInput}, nil
+}
+
+// EstimateBilling retains only the legacy Seedance 1.5 pricing contract.
 func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
+	if a.RequiresOwnBillingExpression(info) || !IsSeedanceFixedPriceModel(info.OriginModelName) {
+		return nil
+	}
 	req, err := relaycommon.GetTaskRequest(c)
 	if err != nil {
 		return nil
-	}
-	modelName := info.OriginModelName
-	if modelName == "" {
-		modelName = req.Model
 	}
 	body, err := a.convertToRequestPayload(cloneTaskSubmitReqForBilling(&req))
 	if err != nil {
 		return nil
 	}
-	if plan, ok, err := resolveConfiguredSeedanceUpscalePlan(info, modelName, body.Resolution); err != nil {
-		return nil
-	} else if ok {
-		applySeedanceUpscalePlan(info, plan)
-		body.Resolution = plan.BillingResolution
-	} else if !IsSeedanceFixedPriceModel(modelName) {
-		return nil
-	}
-	factors, err := seedanceBillingFactors(body)
-	if err != nil {
-		return nil
-	}
+	factors, _ := seedanceBillingFactors(body)
 	return factors
 }
 
@@ -208,10 +274,7 @@ func hasVideoInContent(content []ContentItem) bool {
 func cloneTaskSubmitReqForBilling(req *relaycommon.TaskSubmitReq) *relaycommon.TaskSubmitReq {
 	clone := *req
 	if req.Metadata != nil {
-		clone.Metadata = make(map[string]interface{}, len(req.Metadata))
-		for k, v := range req.Metadata {
-			clone.Metadata[k] = v
-		}
+		clone.Metadata = maps.Clone(req.Metadata)
 	}
 	return &clone
 }
@@ -223,6 +286,9 @@ func seedanceBillingFactors(body *requestPayload) (map[string]float64, error) {
 	seconds := int(*body.Duration)
 	if seconds <= 0 {
 		return nil, fmt.Errorf("seedance duration must be positive")
+	}
+	if seconds > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("seedance duration must not exceed %d seconds", relaycommon.MaxTaskDurationSeconds)
 	}
 
 	if body.Resolution == "" {
@@ -279,10 +345,8 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 type seedanceUpscalePlan struct {
 	ExternalModelName string
 	UpstreamModelName string
-	BillingModelName  string
 	APIKey            string
 	SourceResolution  string
-	BillingResolution string
 	TargetResolution  string
 	MaxRetries        int
 }
@@ -292,11 +356,14 @@ func resolveConfiguredSeedanceUpscalePlan(info *relaycommon.RelayInfo, modelName
 		return seedanceUpscalePlan{}, false, nil
 	}
 	cfg, ok := info.ChannelMeta.ChannelOtherSettings.SeedanceUpscale[modelName]
-	if !ok || !cfg.Enabled {
+	if !ok {
 		return seedanceUpscalePlan{}, false, nil
 	}
+	if !cfg.Enabled {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance processing is disabled for model %s", modelName)
+	}
 	if !seedanceUpscaleGroupAllowed(info, cfg.Groups) {
-		return seedanceUpscalePlan{}, false, nil
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance processing is not available for this group")
 	}
 	normalized, _, ok := NormalizeSeedanceResolution(resolution)
 	if !ok {
@@ -304,24 +371,27 @@ func resolveConfiguredSeedanceUpscalePlan(info *relaycommon.RelayInfo, modelName
 	}
 	rule, ok := cfg.Rules[normalized]
 	if !ok {
-		return seedanceUpscalePlan{}, false, nil
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance processing has no rule for resolution %s", normalized)
 	}
 	upstreamModel := strings.TrimSpace(cfg.MapModel)
 	if upstreamModel == "" {
 		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s must configure map_model", modelName)
-	}
-	if strings.TrimSpace(rule.BillingModel) == "" {
-		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s resolution %s missing billing_model", modelName, normalized)
 	}
 	if strings.TrimSpace(rule.SeedanceResolution) == "" {
 		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance upscale model %s resolution %s missing seedance_resolution", modelName, normalized)
 	}
 	targetResolution := strings.ToLower(strings.TrimSpace(rule.UpscaleResolution))
 	sourceResolution := strings.ToLower(strings.TrimSpace(rule.SeedanceResolution))
-	billingResolution := normalized
-	if _, _, ok := NormalizeSeedanceResolution(billingResolution); !ok {
-		billingResolution = sourceResolution
+	if _, _, valid := NormalizeSeedanceResolution(sourceResolution); !valid {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("invalid seedance source resolution")
 	}
+	if targetResolution == "" && sourceResolution != normalized {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("seedance rule must deliver its requested resolution")
+	}
+	if targetResolution != "" && targetResolution != normalized {
+		return seedanceUpscalePlan{}, false, fmt.Errorf("upscale resolution must match the requested resolution")
+	}
+
 	apiKey := ""
 	maxRetries := 0
 	if targetResolution != "" {
@@ -340,10 +410,8 @@ func resolveConfiguredSeedanceUpscalePlan(info *relaycommon.RelayInfo, modelName
 	return seedanceUpscalePlan{
 		ExternalModelName: modelName,
 		UpstreamModelName: upstreamModel,
-		BillingModelName:  strings.TrimSpace(rule.BillingModel),
 		APIKey:            apiKey,
 		SourceResolution:  sourceResolution,
-		BillingResolution: billingResolution,
 		TargetResolution:  targetResolution,
 		MaxRetries:        maxRetries,
 	}, true, nil
@@ -353,23 +421,24 @@ func seedanceUpscaleGroupAllowed(info *relaycommon.RelayInfo, groups []string) b
 	if len(groups) == 0 {
 		return true
 	}
-	groupSet := make(map[string]bool, len(groups))
-	for _, group := range groups {
-		group = strings.TrimSpace(group)
-		if group != "" {
-			groupSet[group] = true
-		}
+	group := info.UsingGroup
+	if group == "" {
+		group = info.TokenGroup
 	}
-	for _, group := range []string{info.TokenGroup, info.UsingGroup, info.UserGroup} {
-		if groupSet[strings.TrimSpace(group)] {
+	if group == "" || group == "auto" {
+		group = info.UserGroup
+	}
+	for _, allowed := range groups {
+		if strings.TrimSpace(allowed) == group {
 			return true
 		}
 	}
+
 	return false
 }
 
 func applySeedanceUpscalePlan(info *relaycommon.RelayInfo, plan seedanceUpscalePlan) {
-	info.BillingModelName = plan.BillingModelName
+	info.BillingModelName = plan.ExternalModelName
 	if strings.TrimSpace(plan.TargetResolution) == "" {
 		info.VideoUpscale = nil
 		return
@@ -377,7 +446,7 @@ func applySeedanceUpscalePlan(info *relaycommon.RelayInfo, plan seedanceUpscaleP
 	info.VideoUpscale = &relaycommon.VideoUpscaleRelayInfo{
 		Enabled:          true,
 		Stage:            seedanceUpscaleStageSeedance,
-		BillingModelName: plan.BillingModelName,
+		BillingModelName: plan.ExternalModelName,
 		APIKey:           plan.APIKey,
 		SourceResolution: plan.SourceResolution,
 		TargetResolution: plan.TargetResolution,
@@ -488,12 +557,38 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}
 
-	if sec, _ := strconv.Atoi(req.Seconds); sec > 0 {
+	if req.Seconds != "" {
+		sec, err := strconv.Atoi(req.Seconds)
+		if err != nil || sec <= 0 || sec > relaycommon.MaxTaskDurationSeconds {
+			return nil, fmt.Errorf("invalid seedance seconds")
+		}
 		r.Duration = lo.ToPtr(dto.IntValue(sec))
-	} else if req.Duration > 0 {
+	} else if req.Duration != 0 {
 		r.Duration = lo.ToPtr(dto.IntValue(req.Duration))
 	}
 
+	r.Model = req.Model
+	if r.Resolution == "" {
+		r.Resolution = req.Size
+	}
+	r.Resolution = strings.ToLower(strings.TrimSpace(r.Resolution))
+	if width, height, found := strings.Cut(strings.ReplaceAll(r.Resolution, "*", "x"), "x"); found {
+		w, widthErr := strconv.Atoi(width)
+		h, heightErr := strconv.Atoi(height)
+		if widthErr != nil || heightErr != nil || w <= 0 || h <= 0 {
+			return nil, fmt.Errorf("invalid seedance video size")
+		}
+		switch pixels := max(w, h); {
+		case pixels >= 3840:
+			r.Resolution = "4k"
+		case pixels >= 1920:
+			r.Resolution = "1080p"
+		case pixels >= 1280:
+			r.Resolution = "720p"
+		default:
+			r.Resolution = "480p"
+		}
+	}
 	r.Content = lo.Reject(r.Content, func(c ContentItem, _ int) bool { return c.Type == "text" })
 	r.Content = append(r.Content, ContentItem{
 		Type: "text",
