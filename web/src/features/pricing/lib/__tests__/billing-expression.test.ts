@@ -102,6 +102,61 @@ export const deepSeekExpression = `${peakCondition} ? tier("peak", p * 3 + cr * 
 afterEach(() => vi.useRealTimers())
 
 describe('local billing expression evaluation', () => {
+  test('evaluates and displays fixed arithmetic prices and preserves the formula in visual mode', () => {
+    const source = 'tier("image", fixed(0.04 * 4 / 6.7)) * image_count'
+    const result = evaluateBillingExpression(source)
+    expect(result).toMatchObject({ status: 'success', billingUnit: 'request' })
+    assert(result.status === 'success')
+    expect(result.fixedPrice).toBeCloseTo(0.0238805970149254, 14)
+    expect(result.cost).toBeCloseTo(23880.5970149254, 8)
+    const compiled = compileBillingExpression(source)
+    assert(compiled.status === 'ready')
+    expect(readTokenTierChain(compiled.ast)).toMatchObject([
+      { billingUnit: 'request', fixedPrice: result.fixedPrice },
+    ])
+    const visualSource = source.replace(' * image_count', '')
+    const document = parseVisualBillingDocument(visualSource)
+    assert(document)
+    expect(serializeVisualBillingDocument(document)).toEqual({
+      ok: true,
+      source: visualSource,
+    })
+  })
+  test.each([
+    ['(1 + 2) * (4 - 2) / 3', 2],
+    ['-(1 - 2)', 1],
+    ['1 - 1', 0],
+    ['4000000000 * 4000000000', 16000000000000000000],
+  ])('evaluates fixed(%s) as floating point arithmetic', (amount, price) => {
+    expect(
+      evaluateBillingExpression(`tier("request", fixed(${amount}))`)
+    ).toMatchObject({
+      status: 'success',
+      billingUnit: 'request',
+      fixedPrice: price,
+      cost: price * 1000000,
+    })
+  })
+  test.each([
+    '1 / 0',
+    '0 / 0',
+    '1e308 * 2',
+    '1 - 2',
+    'p + 1',
+    'param("n")',
+    'abs(1)',
+    'true ? 1 : 2',
+    '2 ** 3',
+  ])(
+    'rejects invalid fixed amount %s even in an unselected branch',
+    (amount) => {
+      expect(
+        compileBillingExpression(
+          `true ? tier("ok", fixed(0)) : tier("bad", fixed(${amount}))`
+        ).status
+      ).not.toBe('ready')
+    }
+  )
   test('evaluates request prices without token inputs and retains an explicit zero price', () => {
     expect(
       evaluateBillingExpression('tier("request", fixed(0.01))')

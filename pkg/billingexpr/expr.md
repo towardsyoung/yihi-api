@@ -210,8 +210,13 @@ existing tool surcharges are calculated separately and added as before. A stream
 does not incur a fixed fee per chunk. Realtime and task usage expressions reject
 `fixed()` before upstream submission or reservation.
 
-The amount must be a finite, non-negative numeric literal whose v1 scaled value
-is finite. Explicit `fixed(0)` is valid and stays free. Expressions using `fixed`
+The amount must be a finite, non-negative numeric constant or arithmetic expression
+using numeric literals, parentheses, unary signs and `+`, `-`, `*`, `/`, whose v1
+scaled value is finite. Arithmetic uses float64 throughout; division by zero,
+non-finite intermediate results, variables and function calls are rejected.
+For example, `tier("image", fixed(0.04 * 4 / 6.7)) * image_count` preserves
+the cost, multiplier and exchange rate while displaying the computed USD unit price.
+Explicit `fixed(0)` is valid and stays free. Expressions using `fixed`
 must consist of a conditional pricing tree and the standard request multiplier
 factors described below, with each leaf wrapped in `tier()`. Adding fixed and
 token charges in one leaf, adding multiple tiers together, or multiplying a

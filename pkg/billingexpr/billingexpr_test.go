@@ -41,11 +41,39 @@ func TestFixedPriceBranches(t *testing.T) {
 	}
 }
 
+func TestFixedPriceConstantArithmetic(t *testing.T) {
+	for _, tc := range []struct {
+		amount string
+		price  float64
+	}{
+		{"0.04 * 4 / 6.7", 0.0238805970149254},
+		{"(1 + 2) * (4 - 2) / 3", 2},
+		{"-(1 - 2)", 1},
+		{"1 - 1", 0},
+		{"4000000000 * 4000000000", 16000000000000000000},
+	} {
+		t.Run(tc.amount, func(t *testing.T) {
+			expression := `tier("image", fixed(` + tc.amount + `)) * image_count`
+			count := 3
+			cost, trace, err := billingexpr.RunExprWithRequest(expression, billingexpr.TokenParams{}, billingexpr.RequestInput{ImageCount: &count})
+			require.NoError(t, err)
+			require.NotNil(t, trace.FixedPrice)
+			assert.InDelta(t, tc.price, *trace.FixedPrice, 1e-14)
+			assert.InDelta(t, tc.price*3e6, cost, 1e-8)
+			assert.Equal(t, billingexpr.BillingUnitRequest, trace.BillingUnit)
+		})
+	}
+	for _, amount := range []string{"0 / 0", "1e308 * 2", "1 - 2", "p + 1", `param("n")`, "abs(1)", "true ? 1 : 2", "2 ** 3"} {
+		_, err := billingexpr.CompileFromCache(`true ? tier("ok", fixed(0)) : tier("bad", fixed(` + amount + `))`)
+		require.Error(t, err, amount)
+	}
+}
+
 func TestFixedPriceRejectsInvalidLeavesIncludingUnselectedBranches(t *testing.T) {
 	for _, expression := range []string{
 		`true ? tier("ok", p) : tier("bad", fixed(-0.01))`,
 		`tier("bad", fixed(p))`,
-		`tier("bad", fixed(0.01 + 0.02))`,
+		`tier("bad", fixed(1 / 0))`,
 		`tier("bad", fixed(1e308))`,
 		`tier("bad", fixed(0.01) + p * 2)`,
 		`tier("bad", p * fixed(0.01))`,
@@ -69,6 +97,7 @@ func TestFixedPriceQuotaBoundariesAndUnsupportedTaskSnapshots(t *testing.T) {
 		clamped          bool
 	}{
 		{"normal group", `tier("request", fixed(0.01))`, 1.5, 7500, false},
+		{"arithmetic price", `tier("image", fixed(0.04 * 4 / 6.7)) * image_count`, 1, 11940, false},
 		{"free group", `tier("request", fixed(0.01))`, 0, 0, false},
 		{"explicit free price", `tier("free", fixed(0))`, 1, 0, false},
 		{"oversized price saturates instead of crediting", `tier("huge", fixed(1e20))`, 1, math.MaxInt32, true},

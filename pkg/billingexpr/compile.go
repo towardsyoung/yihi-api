@@ -209,7 +209,7 @@ func compileEntryFromCacheByHash(exprStr, hash string) (*cachedEntry, error) {
 		}
 	}
 	patcher := &requestRulePatcher{}
-	prog, err := expr.Compile(body, expr.Env(getCompileEnv(version)), expr.Patch(patcher), expr.AsFloat64())
+	prog, err := expr.Compile(body, expr.Env(getCompileEnv(version)), expr.Patch(fixedPricePatcher{}), expr.Patch(patcher), expr.AsFloat64())
 	if patcher.restrictedIdentifier != "" {
 		return nil, fmt.Errorf("expr compile error: identifier %q is reserved for internal use", patcher.restrictedIdentifier)
 	}

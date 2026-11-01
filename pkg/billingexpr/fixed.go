@@ -19,6 +19,71 @@ func UsesFixedPricingByHash(expression, hash string) bool {
 	return err == nil && entry.fixedPricing
 }
 
+// fixedPriceConstant evaluates only numeric arithmetic using float64 throughout,
+// avoiding integer overflow before conversion to a fixed USD amount.
+func fixedPriceConstant(node ast.Node) (float64, bool) {
+	var result float64
+	switch part := node.(type) {
+	case *ast.IntegerNode:
+		result = float64(part.Value)
+	case *ast.FloatNode:
+		result = part.Value
+	case *ast.UnaryNode:
+		value, ok := fixedPriceConstant(part.Node)
+		if !ok {
+			return 0, false
+		}
+		switch part.Operator {
+		case "+":
+			result = value
+		case "-":
+			result = -value
+		default:
+			return 0, false
+		}
+	case *ast.BinaryNode:
+		left, leftOK := fixedPriceConstant(part.Left)
+		right, rightOK := fixedPriceConstant(part.Right)
+		if !leftOK || !rightOK {
+			return 0, false
+		}
+		switch part.Operator {
+		case "+":
+			result = left + right
+		case "-":
+			result = left - right
+		case "*":
+			result = left * right
+		case "/":
+			if right == 0 {
+				return 0, false
+			}
+			result = left / right
+		default:
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	return result, !math.IsNaN(result) && !math.IsInf(result, 0)
+}
+
+type fixedPricePatcher struct{}
+
+func (fixedPricePatcher) Visit(node *ast.Node) {
+	call, ok := (*node).(*ast.CallNode)
+	if !ok || len(call.Arguments) != 1 {
+		return
+	}
+	callee, ok := call.Callee.(*ast.IdentifierNode)
+	if !ok || callee.Value != "fixed" {
+		return
+	}
+	if amount, ok := fixedPriceConstant(call.Arguments[0]); ok {
+		ast.Patch(&call.Arguments[0], &ast.FloatNode{Value: amount})
+	}
+}
+
 func containsPricingMarker(node ast.Node) bool {
 	return ast.Find(node, func(part ast.Node) bool {
 		identifier, ok := part.(*ast.IdentifierNode)
@@ -72,11 +137,11 @@ func validateFixedPricingTree(node ast.Node) error {
 		if ok {
 			function, direct := fixed.Callee.(*ast.IdentifierNode)
 			if direct && function.Value == "fixed" && len(fixed.Arguments) == 1 {
-				amount, literal := requestRuleNumber(fixed.Arguments[0])
-				if literal && amount >= 0 && !math.IsNaN(amount) && !math.IsInf(amount*1_000_000, 0) {
+				amount, constant := fixedPriceConstant(fixed.Arguments[0])
+				if constant && amount >= 0 && !math.IsNaN(amount) && !math.IsInf(amount*1_000_000, 0) {
 					return nil
 				}
-				return fmt.Errorf("fixed price must be a finite, non-negative numeric literal with a finite v1 value")
+				return fmt.Errorf("fixed price must be a finite, non-negative numeric constant arithmetic expression with a finite v1 value")
 			}
 		}
 		if !containsPricingMarker(price) {

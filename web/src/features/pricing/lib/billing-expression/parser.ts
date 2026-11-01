@@ -429,6 +429,40 @@ function containsPricingMarker(node: ExpressionNode): boolean {
   return calls.has('tier') || calls.has('fixed')
 }
 
+// Match the backend's float64 arithmetic without evaluating request data or calls.
+function fixedPriceConstant(node: ExpressionNode): number | null {
+  let value: number
+  if (node.kind === 'literal' && typeof node.value === 'number') {
+    value = node.value
+  } else if (node.kind === 'unary' && ['+', '-'].includes(node.operator)) {
+    const operand = fixedPriceConstant(node.operand)
+    if (operand === null) return null
+    value = node.operator === '-' ? -operand : operand
+  } else if (node.kind === 'binary') {
+    const left = fixedPriceConstant(node.left)
+    const right = fixedPriceConstant(node.right)
+    if (left === null || right === null) return null
+    switch (node.operator) {
+      case '+':
+        value = left + right
+        break
+      case '-':
+        value = left - right
+        break
+      case '*':
+        value = left * right
+        break
+      case '/':
+        if (right === 0) return null
+        value = left / right
+        break
+      default:
+        return null
+    }
+  } else return null
+  return Number.isFinite(value) ? value : null
+}
+
 function validateFixedPricingTree(
   node: ExpressionNode,
   rules: CompiledBillingExpression['requestRules']
@@ -466,12 +500,16 @@ function validateFixedPricingTree(
     const price = node.args[1]
     if (price.kind === 'call' && price.name === 'fixed') {
       const amount = price.args[0]
-      if (
-        amount.kind === 'literal' &&
-        typeof amount.value === 'number' &&
-        amount.value >= 0 &&
-        Number.isFinite(amount.value * 1_000_000)
-      ) {
+      const value = fixedPriceConstant(amount)
+      if (value !== null && value >= 0 && Number.isFinite(value * 1_000_000)) {
+        // Preserve the source span for lossless visual editing while exposing
+        // the computed unit price to the existing runtime and price display.
+        price.args[0] = {
+          kind: 'literal',
+          value,
+          start: amount.start,
+          end: amount.end,
+        }
         return
       }
     } else if (!containsPricingMarker(price)) return
@@ -479,7 +517,7 @@ function validateFixedPricingTree(
   throw new BillingExpressionError({
     code: 'type',
     detail:
-      'Use tier(name, fixed(amount)) with a finite, non-negative numeric literal; combine pricing branches only with conditions and request multipliers.',
+      'Use tier(name, fixed(amount)) with a finite, non-negative numeric constant arithmetic expression; combine pricing branches only with conditions and request multipliers.',
     position: node.start,
   })
 }
