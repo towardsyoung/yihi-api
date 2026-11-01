@@ -160,6 +160,12 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 			plugin = loaded.Meta.Key
 		}
 	}
+	if item.Type == "image" {
+		quota, version, handled, err := quoteDramaImageRequestPrice(item, ch.Id, mapped, plugin, ratio)
+		if handled {
+			return quota, version, err
+		}
+	}
 	var expression string
 	var configured bool
 	input := billingexpr.RequestInput{}
@@ -234,24 +240,7 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 		} else if plugin != "" {
 			return 0, "", fmt.Errorf("image task provider meter is unavailable")
 		} else {
-			if billing_setting.GetBillingMode(item.Model) != billing_setting.BillingModeTieredExpr {
-				price, ok := ratio_setting.GetModelPrice(item.Model, false)
-				if !ok {
-					return 0, "", fmt.Errorf("image price depends on actual output usage")
-				}
-				quota, err := common.QuotaFromFloatStrict(price * common.QuotaPerUnit * ratio * float64(max(item.Count, 1)))
-				return quota, fmt.Sprint(ch.Id, mapped, price), err
-			}
-			expression, configured = billing_setting.GetBillingExpr(item.Model)
-			if billing_setting.GetBillingMode(item.Model) != billing_setting.BillingModeTieredExpr || !billingexpr.UsesFixedPricing(expression) {
-				return 0, "", fmt.Errorf("image price depends on actual output usage")
-			}
-			count := max(item.Count, 1)
-			input.ImageCount = &count
-			if item.Size == "" && (strings.Contains(expression, "req(") || strings.Contains(expression, "param(")) && !strings.Contains(item.Model, "nano-banana") {
-				return 0, "", fmt.Errorf("effective image size is required for conditional pricing")
-			}
-			input.Body, _ = common.Marshal(map[string]any{"model": item.Model, "n": count, "size": item.Size, "quality": item.Quality, "extra_body": map[string]any{"google": map[string]any{"image_config": map[string]any{"image_size": item.Resolution, "aspect_ratio": item.AspectRatio}}}})
+			return 0, "", fmt.Errorf("image price depends on actual output usage")
 		}
 	}
 	if !configured {
@@ -269,9 +258,60 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 	if err != nil || cost < 0 {
 		return 0, "", fmt.Errorf("cannot evaluate model price")
 	}
-	if item.Type == "image" && input.Usage == nil {
-		cost /= 1_000_000
-	}
 	quota, err := common.QuotaFromFloatStrict(math.Round(cost * common.QuotaPerUnit * ratio))
 	return quota, fmt.Sprint(ch.Id, mapped, expression), err
+}
+
+// Request/image fixed prices do not require a task output-usage meter. Resolve
+// them before rejecting an unimplemented plugin meter, preserving overrides.
+func quoteDramaImageRequestPrice(item dramaMediaItem, channelID int, mapped, plugin string, ratio float64) (int, string, bool, error) {
+	expression, configured := billing_setting.ResolveTaskBillingExpr(plugin, item.Model, mapped)
+	if !configured {
+		if billing_setting.GetBillingMode(item.Model) == billing_setting.BillingModeTieredExpr {
+			return 0, "", false, nil
+		}
+		// These official models use the native images/chat fixed-price path.
+		// Other task plugins can apply additional usage ratios to legacy prices.
+		if plugin != "" && !strings.HasPrefix(item.Model, "gpt-image-") && !strings.HasPrefix(item.Model, "nano-banana-") {
+			return 0, "", false, nil
+		}
+		price, ok := ratio_setting.GetModelPrice(item.Model, false)
+		if !ok {
+			return 0, "", false, nil
+		}
+		count := max(item.Count, 1)
+		if strings.HasPrefix(item.Model, "nano-banana-") && count != 1 {
+			return 0, "", true, fmt.Errorf("quote chat image requests separately")
+		}
+		quota, err := common.QuotaFromFloatStrict(price * common.QuotaPerUnit * ratio * float64(count))
+		return quota, fmt.Sprint(channelID, mapped, price), true, err
+	}
+	if !billingexpr.UsesFixedPricing(expression) {
+		return 0, "", false, nil
+	}
+	if regexp.MustCompile(`\bheader\s*\(`).MatchString(expression) {
+		return 0, "", true, fmt.Errorf("billing requires request headers not available to quote")
+	}
+	for key := range billingexpr.UsedVars(expression) {
+		if slices.Contains([]string{"p", "c", "len", "cr", "cc", "cc1h", "img", "img_cr", "img_o", "ai", "ao"}, key) {
+			return 0, "", true, fmt.Errorf("billing depends on unavailable token usage")
+		}
+	}
+	if len(billingexpr.UsedUsageKeys(expression)) > 0 {
+		return 0, "", true, fmt.Errorf("fixed image price requires a provider usage meter")
+	}
+	if item.Size == "" && regexp.MustCompile(`\b(req|param)\s*\(`).MatchString(expression) && !strings.HasPrefix(item.Model, "nano-banana-") {
+		return 0, "", true, fmt.Errorf("effective image size is required for conditional pricing")
+	}
+	count := max(item.Count, 1)
+	body, err := common.Marshal(map[string]any{"model": item.Model, "n": count, "size": item.Size, "quality": item.Quality, "extra_body": map[string]any{"google": map[string]any{"image_config": map[string]any{"image_size": item.Resolution, "aspect_ratio": item.AspectRatio}}}})
+	if err != nil {
+		return 0, "", true, err
+	}
+	cost, _, err := billingexpr.RunExprWithRequest(expression, billingexpr.TokenParams{}, billingexpr.RequestInput{Body: body, ImageCount: &count})
+	if err != nil || cost < 0 {
+		return 0, "", true, fmt.Errorf("cannot evaluate model price")
+	}
+	quota, err := billingexpr.QuotaRoundStrict(cost / 1_000_000 * common.QuotaPerUnit * ratio)
+	return quota, fmt.Sprint(channelID, mapped, expression), true, err
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/stretchr/testify/require"
 	"math"
 	"os"
@@ -37,6 +38,73 @@ func TestDramaMediaQuoteBilling(t *testing.T) {
 	for _, duration := range []float64{-1, math.Inf(1), math.NaN(), .5, 3601} {
 		require.Error(t, validateDramaMediaItem(dramaMediaItem{Model: video, Type: "video", Duration: duration}))
 	}
+}
+
+func TestDramaMediaConfiguredImagePricesWithPluginChannel(t *testing.T) {
+	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
+	previous := *settings
+	prices, err := common.Marshal(ratio_setting.GetModelPriceCopy())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		*settings = previous
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(prices)))
+	})
+	*settings = billing_setting.BillingSetting{
+		BillingMode: map[string]string{
+			"gpt-image-2.5":          billing_setting.BillingModeTieredExpr,
+			"gpt-image-2.5-flare":    billing_setting.BillingModeTieredExpr,
+			"gpt-image-2.5-sunburst": billing_setting.BillingModeTieredExpr,
+		},
+		BillingExpr: map[string]string{
+			"gpt-image-2.5":          `tier("image", fixed(0.031)) * image_count`,
+			"gpt-image-2.5-flare":    `tier("request", fixed(0.031))`,
+			"gpt-image-2.5-sunburst": `tier("request", fixed(0.031))`,
+		},
+		PluginBillingExpr: map[string]string{},
+	}
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nano-banana-2.1":0.062}`))
+	channel := &model.Channel{Id: 12, Setting: common.GetPointer(`{"task_plugin_key":"image-provider"}`)}
+	for _, tc := range []struct {
+		model string
+		count int
+		usd   float64
+	}{
+		{"gpt-image-2.5", 3, .093},
+		{"gpt-image-2.5-flare", 3, .031},
+		{"gpt-image-2.5-sunburst", 3, .031},
+		{"nano-banana-2.1", 1, .062},
+	} {
+		for _, resolution := range []string{"1K", "2K", "4K"} {
+			t.Run(tc.model+"/"+resolution, func(t *testing.T) {
+				quota, _, err := quoteDramaMediaChannel(dramaMediaItem{Type: "image", Model: tc.model, Count: tc.count, Resolution: resolution, Size: "2048x2048"}, channel, .7)
+				require.NoError(t, err)
+				require.Equal(t, common.QuotaRound(tc.usd*common.QuotaPerUnit*.7), quota)
+			})
+		}
+	}
+	item := dramaMediaItem{Type: "image", Model: "gpt-image-2.5-flare", Count: 1, Size: "1024x1024"}
+	_, oldVersion, err := quoteDramaMediaChannel(item, channel, 1)
+	require.NoError(t, err)
+	settings.BillingExpr[item.Model] = `tier("request", fixed(0.045))`
+	quota, newVersion, err := quoteDramaMediaChannel(item, channel, 1)
+	require.NoError(t, err)
+	require.Equal(t, common.QuotaRound(.045*common.QuotaPerUnit), quota)
+	require.NotEqual(t, oldVersion, newVersion)
+	settings.BillingExpr[item.Model] = `tier("request", fixed(0.031)) + c`
+	_, _, err = quoteDramaMediaChannel(item, channel, 1)
+	require.Error(t, err)
+	settings.BillingExpr[item.Model] = `tier("request", fixed(0.031)) * (header("Content-Type") == "application/json" ? 2 : 1)`
+	_, _, err = quoteDramaMediaChannel(item, channel, 1)
+	require.ErrorContains(t, err, "headers")
+	settings.BillingExpr[item.Model] = `tier("request", fixed(0.031))`
+	key := billing_setting.PluginBillingExprKey("image-provider", item.Model)
+	settings.PluginBillingExpr[key] = `tier("request", fixed(0.07))`
+	quota, _, err = quoteDramaMediaChannel(item, channel, 1)
+	require.NoError(t, err)
+	require.Equal(t, common.QuotaRound(.07*common.QuotaPerUnit), quota)
+	settings.PluginBillingExpr[key] = `tier("usage", u("outputs") * 0.07)`
+	_, _, err = quoteDramaMediaChannel(item, channel, 1)
+	require.Error(t, err, "usage pricing must not fall back to a fixed model price")
 }
 
 func TestDramaMediaSeedreamRealMeter(t *testing.T) {
