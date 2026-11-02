@@ -16,11 +16,13 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/relay/channel/task/grsai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -152,6 +154,11 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 	if err := common.UnmarshalJsonStr(ch.GetModelMapping(), &mapping); err == nil && mapping[item.Model] != "" {
 		mapped = mapping[item.Model]
 	}
+	// Grsai is a native adaptor; a registry plugin for the same model must not
+	// replace its resolution or duration contract.
+	if item.Type == "video" && ch.Type == constant.ChannelTypeGrsai {
+		return quoteDramaGrsaiVideo(item, ch.Id, mapped, ratio)
+	}
 	plugin := ch.GetSetting().TaskPluginKey
 	loaded, loadedOK := jsplugin.DefaultRegistry.Get(plugin)
 	if plugin == "" {
@@ -260,6 +267,71 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 	}
 	quota, err := common.QuotaFromFloatStrict(math.Round(cost * common.QuotaPerUnit * ratio))
 	return quota, fmt.Sprint(ch.Id, mapped, expression), err
+}
+
+func quoteDramaGrsaiVideo(item dramaMediaItem, channelID int, mapped string, ratio float64) (int, string, error) {
+	if err := validateDramaMediaItem(item); err != nil {
+		return 0, "", err
+	}
+	if item.HasReferenceVideo {
+		return 0, "", fmt.Errorf("Grsai H3 does not support reference video")
+	}
+	aspectRatio := item.AspectRatio
+	if aspectRatio == "" {
+		aspectRatio = "16:9"
+	}
+	c := &gin.Context{}
+	c.Set("task_request", relaycommon.TaskSubmitReq{
+		Model: mapped, Prompt: "quote", Duration: int(item.Duration),
+		Metadata: map[string]any{"resolution": item.Resolution, "aspect_ratio": aspectRatio},
+	})
+	info := &relaycommon.RelayInfo{OriginModelName: item.Model, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: mapped}}
+	adaptor := &grsai.TaskAdaptor{}
+	facts, err := adaptor.ExtractUsageFactsValidated(c, info)
+	if err != nil {
+		return 0, "", err
+	}
+	expression, configured := billing_setting.ResolveTaskBillingExpr("", item.Model, mapped)
+	if configured || billing_setting.GetBillingMode(item.Model) == billing_setting.BillingModeTieredExpr {
+		if !configured {
+			return 0, "", fmt.Errorf("model billing is not configured")
+		}
+		if billingexpr.UsesFixedPricing(expression) {
+			return 0, "", fmt.Errorf("fixed pricing is not supported for task usage expressions")
+		}
+		for key := range billingexpr.UsedUsageKeys(expression) {
+			if _, ok := facts[key]; !ok {
+				return 0, "", fmt.Errorf("billing requires unknown usage: %s", key)
+			}
+		}
+		cost, _, err := billingexpr.RunExprWithRequest(expression, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: facts})
+		if err != nil || cost < 0 {
+			return 0, "", fmt.Errorf("cannot evaluate model price")
+		}
+		quota, err := billingexpr.QuotaRoundStrict(cost * common.QuotaPerUnit * ratio)
+		return quota, fmt.Sprint(channelID, mapped, expression), err
+	}
+	price, ok := ratio_setting.GetModelPrice(item.Model, false)
+	if !ok {
+		price, ok = ratio_setting.GetDefaultModelPriceMap()[item.Model]
+		if !ok {
+			return 0, "", fmt.Errorf("model billing is not configured")
+		}
+	}
+	// Legacy task billing truncates the base quota before applying adaptor ratios.
+	base, err := common.QuotaFromFloatStrict(price * common.QuotaPerUnit * ratio)
+	if err != nil {
+		return 0, "", err
+	}
+	if common.StringsContains(constant.TaskPricePatches, item.Model) {
+		return base, fmt.Sprint(channelID, mapped, price), nil
+	}
+	priceData := types.PriceData{}
+	for key, value := range adaptor.EstimateBilling(c, info) {
+		priceData.AddOtherRatio(key, value)
+	}
+	quota, err := common.QuotaFromFloatStrict(priceData.ApplyOtherRatiosToFloat(float64(base)))
+	return quota, fmt.Sprint(channelID, mapped, price), err
 }
 
 // Request/image fixed prices do not require a task output-usage meter. Resolve

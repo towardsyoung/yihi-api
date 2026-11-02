@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
@@ -128,4 +129,69 @@ func TestDramaMediaSeedreamRealMeter(t *testing.T) {
 	require.Equal(t, common.QuotaRound(.09*common.QuotaPerUnit), quota)
 	_, _, err = quoteDramaMediaChannel(dramaMediaItem{Model: name, Type: "image", Count: 1, Size: "2048x2048"}, channel, 1)
 	require.ErrorContains(t, err, "reference image count")
+}
+
+func TestDramaMediaGrsaiH3Quote(t *testing.T) {
+	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
+	previous := *settings
+	prices, err := common.Marshal(ratio_setting.GetModelPriceCopy())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		*settings = previous
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(prices)))
+	})
+	const name = "minimax-h3"
+	const expression = `tier("video", u("seconds") * (u("resolution") == "480p" ? 0.1 : u("resolution") == "768p" ? 0.14 : 0.3) * (u("video_input") == "none" ? 1 : 1.65))`
+	*settings = billing_setting.BillingSetting{
+		BillingMode:       map[string]string{name: billing_setting.BillingModeTieredExpr},
+		BillingExpr:       map[string]string{name: expression},
+		PluginBillingExpr: map[string]string{"hailuo::minimax-h3": `tier("other-provider", 99)`},
+	}
+	channel := &model.Channel{Id: 64, Type: constant.ChannelTypeGrsai, Setting: common.GetPointer(`{"task_plugin_key":"hailuo"}`)}
+	for _, tc := range []struct {
+		resolution string
+		duration   float64
+		unit       float64
+	}{
+		{"480p", 1, .1}, {"480p", 15, .1}, {"768p", 15, .14}, {"1080p", 10, .3}, {"768P", 5, .14},
+	} {
+		t.Run(fmt.Sprintf("%s/%g", tc.resolution, tc.duration), func(t *testing.T) {
+			quota, _, err := quoteDramaMediaChannel(dramaMediaItem{Type: "video", Model: name, Resolution: tc.resolution, Duration: tc.duration, AspectRatio: "9:16"}, channel, .7)
+			require.NoError(t, err)
+			require.Equal(t, common.QuotaRound(tc.duration*tc.unit*common.QuotaPerUnit*.7), quota)
+		})
+	}
+	item := dramaMediaItem{Type: "video", Model: name, Resolution: "768p", Duration: 5, AspectRatio: "16:9"}
+	for _, invalid := range []dramaMediaItem{
+		{Type: "video", Model: name, Resolution: "1080p", Duration: 11},
+		{Type: "video", Model: name, Resolution: "480p", Duration: 16},
+		{Type: "video", Model: name, Resolution: "768p", Duration: .5},
+		{Type: "video", Model: name, Resolution: "2K", Duration: 5},
+		{Type: "video", Model: name, Resolution: "768p", Duration: 5, AspectRatio: "1:1"},
+		{Type: "video", Model: name, Resolution: "768p", Duration: 5, HasReferenceVideo: true},
+	} {
+		_, _, err := quoteDramaMediaChannel(invalid, channel, 1)
+		require.Error(t, err)
+	}
+	_, _, err = quoteDramaMediaChannel(item, &model.Channel{Type: constant.ChannelTypeMiniMax}, 1)
+	require.ErrorContains(t, err, "meter is unavailable", "Hailuo must not use the Grsai contract")
+	alias := "h3-grsai-alias"
+	settings.BillingMode[alias] = billing_setting.BillingModeTieredExpr
+	settings.BillingExpr[alias] = expression
+	aliasChannel := &model.Channel{Type: constant.ChannelTypeGrsai, ModelMapping: common.GetPointer(`{"h3-grsai-alias":"minimax-h3"}`)}
+	item.Model = alias
+	_, _, err = quoteDramaMediaChannel(item, aliasChannel, 1)
+	require.NoError(t, err)
+	item.Model = name
+	settings.BillingMode[name] = billing_setting.BillingModeRatio
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"minimax-h3":0.0000017}`))
+	quota, _, err := quoteDramaMediaChannel(item, channel, 1.37)
+	require.NoError(t, err)
+	base, err := common.QuotaFromFloatStrict(.0000017 * common.QuotaPerUnit * 1.37)
+	require.NoError(t, err)
+	require.Equal(t, base*5*2, quota, "legacy billing truncates before duration/resolution multipliers")
+	settings.BillingMode[name] = billing_setting.BillingModeTieredExpr
+	settings.BillingExpr[name] = `tier("wrong", u("input_video_seconds"))`
+	_, _, err = quoteDramaMediaChannel(item, channel, 1)
+	require.ErrorContains(t, err, "unknown usage")
 }
