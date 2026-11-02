@@ -271,7 +271,9 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 			ModelPricingDescription: ModelPricingDescription{Effective: effectiveModelPricing(values, name)}}
 		entry.CacheWriteMode = ResolveCacheWriteMode(name, configured)
 		entry.BillingDetails = ResolveLegacyBillingDetails(name, entry.Effective, configured)
-		if plugin, ok := generation.GetByModel(name); ok {
+		if schema := billing_setting.NativeTaskUsageSchema(name); schema != nil {
+			entry.UsageSchema = schema
+		} else if plugin, ok := generation.GetByModel(name); ok {
 			entry.UsageSchema, _ = plugin.Meta.UsageForModel(name)
 		} else if target, ok := ResolveTaskModelAlias(generation, name); ok {
 			if _, ok := generation.Get(target.PluginKey); ok {
@@ -424,7 +426,9 @@ func validateModelPricing(name string, values, previous PricingValues) error {
 			// shared models against each profile, so their prices must follow it.
 			unchanged := previous[key] == expression
 			var err error
-			if plugins := generation.PluginsByModel(name); len(plugins) > 0 {
+			if schema := billing_setting.NativeTaskUsageSchema(name); schema != nil {
+				err = billing_setting.SmokeTestTaskExpr(expression, schema)
+			} else if plugins := generation.PluginsByModel(name); len(plugins) > 0 {
 				for _, plugin := range plugins {
 					_, overridden := variants[plugin.Meta.Key]
 					_, wasOverridden := previousVariants[plugin.Meta.Key]

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -25,6 +26,79 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestGrsaiH3UsagePricing(t *testing.T) {
+	const name = "minimax-h3"
+	const expression = `u("resolution") == "480p"
+		? tier("480p", u("seconds") * (0.1 / 6.7) * 1.8 * (u("video_input") == "video" ? 1.65 : 1))
+		: u("resolution") == "768p"
+		? tier("768p", u("seconds") * (0.14 / 6.7) * 1.8 * (u("video_input") == "video" ? 1.65 : 1))
+		: tier("1080p", u("seconds") * (0.3 / 6.7) * 1.8 * (u("video_input") == "video" ? 1.65 : 1))`
+	saveBillingConfig(t)
+	require.NoError(t, model.ValidateModelPricing(name, model.PricingValues{
+		"billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": expression,
+	}))
+	require.ErrorContains(t, model.ValidateModelPricing(name, model.PricingValues{
+		"billing_setting.billing_expr": `u("missing")`,
+	}), "not declared")
+	require.Error(t, model.ValidateModelPricing("ordinary-model", model.PricingValues{
+		"billing_setting.billing_expr": expression,
+	}))
+	expressions, err := common.Marshal(map[string]string{name: expression})
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"minimax-h3":"tiered_expr"}`,
+		"billing_setting.billing_expr": string(expressions),
+	}))
+	service.InitHttpClient()
+	for _, tc := range []struct {
+		resolution string
+		duration   int
+		unitPrice  float64
+		valid      bool
+	}{
+		{"480p", 15, 0.1, true}, {"768p", 15, 0.14, true}, {"1080p", 10, 0.3, true},
+		{"1080p", 11, 0, false}, {"768p", 16, 0, false}, {"480p", -1, 0, false},
+	} {
+		t.Run(fmt.Sprintf("%s-%d", tc.resolution, tc.duration), func(t *testing.T) {
+			called := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				called = true
+				assert.Equal(t, "/v1/api/generate", req.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"grsai-test-job","status":"running"}`))
+			}))
+			defer server.Close()
+			c, info := newTaskSubmitContext(t, name, "")
+			body := fmt.Sprintf(`{"model":"minimax-h3","prompt":"landscape","duration":%d,"metadata":{"resolution":%q,"aspect_ratio":"16:9"}}`, tc.duration, tc.resolution)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+			common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeGrsai)
+			c.Set("group", "default")
+			info.UserGroup, info.UsingGroup, info.OriginModelName = "default", "default", name
+			info.Billing = &imageReservation{limit: 1 << 30}
+			result, taskErr := RelayTaskSubmit(c, info)
+			if !tc.valid {
+				require.NotNil(t, taskErr)
+				assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
+				assert.False(t, called)
+				return
+			}
+			require.Nil(t, taskErr, "%+v", taskErr)
+			require.NotNil(t, result)
+			assert.True(t, called)
+			wantCost := float64(tc.duration) * tc.unitPrice / 6.7 * 1.8
+			assert.Equal(t, common.QuotaRound(wantCost*common.QuotaPerUnit), result.Quota)
+			require.NotNil(t, info.TieredBillingSnapshot)
+			assert.Equal(t, map[string]any{"seconds": float64(tc.duration), "resolution": tc.resolution, "video_input": "none"}, info.TieredBillingSnapshot.UsageFacts)
+			assert.Empty(t, info.PriceData.OtherRatios())
+			settled, _, err := service.EvaluateTaskCompletionUsage(info.TieredBillingSnapshot, nil)
+			require.NoError(t, err)
+			assert.Equal(t, result.Quota, settled.ActualQuotaAfterGroup)
+		})
+	}
+}
 
 func setupRelayChannelDB(t *testing.T) *gorm.DB {
 	t.Helper()

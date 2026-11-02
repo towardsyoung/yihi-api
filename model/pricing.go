@@ -394,7 +394,9 @@ func updatePricing() {
 				usageModel = target.Declared
 			}
 		}
-		if ok && plugin != nil {
+		if schema := billing_setting.NativeTaskUsageSchema(model); schema != nil {
+			pricing.BillingUsageSchema = schema
+		} else if ok && plugin != nil {
 			usageSchema, usageExamples := plugin.Meta.UsageForModel(usageModel)
 			if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.SeedanceUpscale {
 				usageSchema, usageExamples = TaskAliasUsage(pluginGeneration, target)

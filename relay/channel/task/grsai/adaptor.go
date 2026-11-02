@@ -132,6 +132,23 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, _ *relaycommon.RelayInfo) 
 	return map[string]float64{"seconds": float64(body.Duration), "resolution": resolutionRatio}
 }
 
+func (a *TaskAdaptor) ExtractUsageFacts(c *gin.Context, info *relaycommon.RelayInfo) map[string]any {
+	facts, _ := a.ExtractUsageFactsValidated(c, info)
+	return facts
+}
+
+func (a *TaskAdaptor) ExtractUsageFactsValidated(c *gin.Context, info *relaycommon.RelayInfo) (map[string]any, error) {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil, err
+	}
+	body, err := buildGenerateRequest(&req, info.UpstreamModelName)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"seconds": float64(body.Duration), "resolution": body.Resolution, "video_input": "none"}, nil
+}
+
 func (a *TaskAdaptor) AdjustBillingOnSubmit(_ *relaycommon.RelayInfo, _ []byte) map[string]float64 {
 	return nil
 }
