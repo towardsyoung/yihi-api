@@ -1,7 +1,10 @@
 package relay
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -20,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -93,6 +97,129 @@ func TestGrsaiH3UsagePricing(t *testing.T) {
 			require.NotNil(t, info.TieredBillingSnapshot)
 			assert.Equal(t, map[string]any{"seconds": float64(tc.duration), "resolution": tc.resolution, "video_input": "none"}, info.TieredBillingSnapshot.UsageFacts)
 			assert.Empty(t, info.PriceData.OtherRatios())
+			settled, _, err := service.EvaluateTaskCompletionUsage(info.TieredBillingSnapshot, nil)
+			require.NoError(t, err)
+			assert.Equal(t, result.Quota, settled.ActualQuotaAfterGroup)
+		})
+	}
+}
+
+func TestOpenAIH3UsagePricing(t *testing.T) {
+	saveBillingConfig(t)
+	prices, err := common.Marshal(ratio_setting.GetModelPriceCopy())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(prices))) })
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"minimax-h3":0.01}`))
+	source, err := builtinplugins.Source("sora")
+	require.NoError(t, err)
+	previousRegistry := pluginruntime.DefaultRegistry
+	pluginruntime.DefaultRegistry = pluginruntime.NewRegistry()
+	t.Cleanup(func() { pluginruntime.DefaultRegistry = previousRegistry })
+	_, err = pluginruntime.DefaultRegistry.Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	const name = "minimax-h3"
+	const expression = `tier("h3", u("seconds") * (u("resolution") == "480p" ? 0.1 : u("resolution") == "768p" ? 0.14 : 0.3) * (u("video_input") == "none" ? 1 : 1.65))`
+	expressions, err := common.Marshal(map[string]string{name: expression})
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"minimax-h3":"tiered_expr"}`,
+		"billing_setting.billing_expr": string(expressions),
+	}))
+	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
+	service.InitHttpClient()
+	for _, tc := range []struct {
+		resolution string
+		seconds    int
+		unit       float64
+		valid      bool
+		field      string
+		multipart  bool
+		legacy     bool
+	}{
+		{"480p", 1, .1, true, "duration", false, false}, {"768p", 1, .14, true, "duration", false, false}, {"768p", 1, .14, true, "seconds", false, false},
+		{"1080p", 10, .3, true, "duration", false, false}, {"1080p", 11, 0, false, "duration", false, false}, {"768p", 16, 0, false, "duration", false, false},
+		{"768p", 5, .14, true, "seconds", true, false}, {"480p", 5, .1, true, "duration", true, false},
+		{"1080p", 11, 0, false, "seconds", true, false}, {"768p", 16, 0, false, "duration", true, false},
+		{"768p", 5, .01, true, "seconds", true, true}, {"768p", 16, 0, false, "seconds", true, true},
+	} {
+		t.Run(fmt.Sprintf("%s/%d/%s/multipart=%t/legacy=%t", tc.resolution, tc.seconds, tc.field, tc.multipart, tc.legacy), func(t *testing.T) {
+			settings.BillingMode[name] = billing_setting.BillingModeTieredExpr
+			if tc.legacy {
+				settings.BillingMode[name] = billing_setting.BillingModeRatio
+			}
+			called := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				assert.Equal(t, "/v1/videos", r.URL.Path)
+				if tc.multipart {
+					if !assert.NoError(t, r.ParseMultipartForm(1<<20)) {
+						return
+					}
+					defer r.MultipartForm.RemoveAll()
+					assert.Equal(t, strconv.Itoa(tc.seconds), r.FormValue(tc.field))
+					assert.JSONEq(t, fmt.Sprintf(`{"resolution":%q,"aspect_ratio":"16:9"}`, tc.resolution), r.FormValue("metadata"))
+					file, _, err := r.FormFile("input_reference")
+					if !assert.NoError(t, err) {
+						return
+					}
+					defer file.Close()
+					content, err := io.ReadAll(file)
+					assert.NoError(t, err)
+					assert.Equal(t, "reference-image", string(content))
+				} else {
+					var body map[string]any
+					if !assert.NoError(t, common.DecodeJson(r.Body, &body)) {
+						return
+					}
+					assert.Equal(t, float64(tc.seconds), body[tc.field])
+					assert.Equal(t, tc.resolution, body["metadata"].(map[string]any)["resolution"])
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"h3-compatible-task","status":"running"}`))
+			}))
+			defer server.Close()
+			c, info := newTaskSubmitContext(t, name, "")
+			body := map[string]any{"model": name, "prompt": "landscape", "duration": tc.seconds, "metadata": map[string]any{"resolution": tc.resolution, "aspect_ratio": "16:9"}}
+			delete(body, "duration")
+			body[tc.field] = tc.seconds
+			c.Set("task_request", body)
+			if tc.multipart {
+				var input bytes.Buffer
+				writer := multipart.NewWriter(&input)
+				require.NoError(t, writer.WriteField("model", name))
+				require.NoError(t, writer.WriteField("prompt", "landscape"))
+				require.NoError(t, writer.WriteField(tc.field, strconv.Itoa(tc.seconds)))
+				require.NoError(t, writer.WriteField("metadata", fmt.Sprintf(`{"resolution":%q,"aspect_ratio":"16:9"}`, tc.resolution)))
+				file, err := writer.CreateFormFile("input_reference", "reference.png")
+				require.NoError(t, err)
+				_, err = io.WriteString(file, "reference-image")
+				require.NoError(t, err)
+				require.NoError(t, writer.Close())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", bytes.NewReader(input.Bytes()))
+				c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+			}
+			common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+			info.UserGroup, info.UsingGroup, info.OriginModelName = "default", "default", name
+			info.Billing = &imageReservation{limit: 1 << 30}
+			result, taskErr := RelayTaskSubmit(c, info)
+			if !tc.valid {
+				require.NotNil(t, taskErr)
+				assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
+				assert.False(t, called)
+				return
+			}
+			require.Nil(t, taskErr, "%+v", taskErr)
+			require.NotNil(t, result)
+			assert.True(t, called)
+			assert.Equal(t, common.QuotaRound(float64(tc.seconds)*tc.unit*common.QuotaPerUnit), result.Quota)
+			if tc.legacy {
+				assert.Nil(t, info.TieredBillingSnapshot)
+				assert.Equal(t, map[string]float64{"seconds": float64(tc.seconds)}, info.PriceData.OtherRatios())
+				return
+			}
+			require.NotNil(t, info.TieredBillingSnapshot)
+			assert.Equal(t, map[string]any{"seconds": float64(tc.seconds), "resolution": tc.resolution, "video_input": "none"}, info.TieredBillingSnapshot.UsageFacts)
 			settled, _, err := service.EvaluateTaskCompletionUsage(info.TieredBillingSnapshot, nil)
 			require.NoError(t, err)
 			assert.Equal(t, result.Quota, settled.ActualQuotaAfterGroup)

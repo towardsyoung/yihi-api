@@ -195,3 +195,52 @@ func TestDramaMediaGrsaiH3Quote(t *testing.T) {
 	_, _, err = quoteDramaMediaChannel(item, channel, 1)
 	require.ErrorContains(t, err, "unknown usage")
 }
+
+func TestDramaMediaOpenAIH3Quote(t *testing.T) {
+	prices, err := common.Marshal(ratio_setting.GetModelPriceCopy())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(prices))) })
+	source, err := os.ReadFile("../plugins/tasks/sora/plugin.js")
+	require.NoError(t, err)
+	previousRegistry := jsplugin.DefaultRegistry
+	jsplugin.DefaultRegistry = jsplugin.NewRegistry()
+	t.Cleanup(func() { jsplugin.DefaultRegistry = previousRegistry })
+	_, err = jsplugin.DefaultRegistry.Register(string(source), jsplugin.Options{})
+	require.NoError(t, err)
+	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
+	previous := *settings
+	t.Cleanup(func() { *settings = previous })
+	const name = "minimax-h3"
+	*settings = billing_setting.BillingSetting{
+		BillingMode:       map[string]string{name: billing_setting.BillingModeTieredExpr},
+		BillingExpr:       map[string]string{name: `tier("video", u("seconds") * (u("resolution") == "480p" ? 0.1 : u("resolution") == "768p" ? 0.14 : 0.3))`},
+		PluginBillingExpr: map[string]string{},
+	}
+	proxy := &model.Channel{Id: 24, Type: constant.ChannelTypeOpenAI}
+	native := &model.Channel{Id: 35, Type: constant.ChannelTypeGrsai}
+	for _, resolution := range []string{"480p", "768p", "1080p"} {
+		item := dramaMediaItem{Type: "video", Model: name, Duration: 1, Resolution: resolution, AspectRatio: "16:9"}
+		proxyQuota, _, err := quoteDramaMediaChannel(item, proxy, .7)
+		require.NoError(t, err)
+		nativeQuota, _, err := quoteDramaMediaChannel(item, native, .7)
+		require.NoError(t, err)
+		require.Equal(t, nativeQuota, proxyQuota)
+	}
+	key := billing_setting.PluginBillingExprKey("sora", name)
+	settings.PluginBillingExpr[key] = `tier("proxy", u("seconds") * 0.09)`
+	item := dramaMediaItem{Type: "video", Model: name, Duration: 1, Resolution: "768p"}
+	quota, _, err := quoteDramaMediaChannel(item, proxy, 1)
+	require.NoError(t, err)
+	require.Equal(t, common.QuotaRound(.09*common.QuotaPerUnit), quota)
+	item.Duration = 11
+	item.Resolution = "1080p"
+	_, _, err = quoteDramaMediaChannel(item, proxy, 1)
+	require.Error(t, err)
+	delete(settings.PluginBillingExpr, key)
+	settings.BillingMode[name] = billing_setting.BillingModeRatio
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"minimax-h3":0.01}`))
+	item.Resolution, item.Duration = "768p", 5
+	quota, _, err = quoteDramaMediaChannel(item, proxy, 1)
+	require.NoError(t, err)
+	require.Equal(t, common.QuotaRound(.01*common.QuotaPerUnit*5), quota, "OpenAI legacy price uses the driver's per-second multiplier")
+}

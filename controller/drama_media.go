@@ -157,7 +157,7 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 	// Grsai is a native adaptor; a registry plugin for the same model must not
 	// replace its resolution or duration contract.
 	if item.Type == "video" && ch.Type == constant.ChannelTypeGrsai {
-		return quoteDramaGrsaiVideo(item, ch.Id, mapped, ratio)
+		return quoteDramaH3Video(item, ch.Id, mapped, "", ratio)
 	}
 	plugin := ch.GetSetting().TaskPluginKey
 	loaded, loadedOK := jsplugin.DefaultRegistry.Get(plugin)
@@ -165,6 +165,12 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 		loaded, loadedOK = jsplugin.DefaultRegistry.GetByChannelType(ch.Type)
 		if loadedOK {
 			plugin = loaded.Meta.Key
+		}
+	}
+	if item.Type == "video" && ch.Type == constant.ChannelTypeOpenAI && mapped == "minimax-h3" && loadedOK && plugin == "sora" {
+		platform := ch.GetOtherSettings().TaskPlatform
+		if platform == "" || platform == "sora" || platform == "1" || platform == "55" {
+			return quoteDramaH3Video(item, ch.Id, mapped, plugin, ratio)
 		}
 	}
 	if item.Type == "image" {
@@ -269,12 +275,12 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 	return quota, fmt.Sprint(ch.Id, mapped, expression), err
 }
 
-func quoteDramaGrsaiVideo(item dramaMediaItem, channelID int, mapped string, ratio float64) (int, string, error) {
+func quoteDramaH3Video(item dramaMediaItem, channelID int, mapped, plugin string, ratio float64) (int, string, error) {
 	if err := validateDramaMediaItem(item); err != nil {
 		return 0, "", err
 	}
 	if item.HasReferenceVideo {
-		return 0, "", fmt.Errorf("Grsai H3 does not support reference video")
+		return 0, "", fmt.Errorf("MiniMax H3 does not support reference video")
 	}
 	aspectRatio := item.AspectRatio
 	if aspectRatio == "" {
@@ -291,7 +297,7 @@ func quoteDramaGrsaiVideo(item dramaMediaItem, channelID int, mapped string, rat
 	if err != nil {
 		return 0, "", err
 	}
-	expression, configured := billing_setting.ResolveTaskBillingExpr("", item.Model, mapped)
+	expression, configured := billing_setting.ResolveTaskBillingExpr(plugin, item.Model, mapped)
 	if configured || billing_setting.GetBillingMode(item.Model) == billing_setting.BillingModeTieredExpr {
 		if !configured {
 			return 0, "", fmt.Errorf("model billing is not configured")
@@ -327,8 +333,12 @@ func quoteDramaGrsaiVideo(item dramaMediaItem, channelID int, mapped string, rat
 		return base, fmt.Sprint(channelID, mapped, price), nil
 	}
 	priceData := types.PriceData{}
-	for key, value := range adaptor.EstimateBilling(c, info) {
-		priceData.AddOtherRatio(key, value)
+	if plugin == "sora" {
+		priceData.AddOtherRatio("seconds", item.Duration)
+	} else {
+		for key, value := range adaptor.EstimateBilling(c, info) {
+			priceData.AddOtherRatio(key, value)
+		}
 	}
 	quota, err := common.QuotaFromFloatStrict(priceData.ApplyOtherRatiosToFloat(float64(base)))
 	return quota, fmt.Sprint(channelID, mapped, price), err

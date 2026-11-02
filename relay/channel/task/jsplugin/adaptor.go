@@ -27,6 +27,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel"
+	"github.com/QuantumNous/new-api/relay/channel/task/grsai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
@@ -162,6 +163,18 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *TaskAdaptor) EstimateBillingValidated(c *gin.Context, info *relaycommon.RelayInfo) (map[string]float64, error) {
+	if a.plugin.Meta.Key == "sora" && info.ChannelType == constant.ChannelTypeOpenAI && info.UpstreamModelName == "minimax-h3" {
+		billingContext, err := a.openAIH3BillingContext(c)
+		if err != nil {
+			return nil, err
+		}
+		facts, err := (&grsai.TaskAdaptor{}).ExtractUsageFactsValidated(billingContext, info)
+		if err != nil {
+			return nil, err
+		}
+		// Keep the OpenAI driver's existing legacy per-second multiplier.
+		return map[string]float64{"seconds": facts["seconds"].(float64)}, nil
+	}
 	usageContext := a.submitContext(c, info)
 	usageContext["usagePurpose"] = "billing_ratios"
 	return a.usageRatios(c.Request.Context(), []string{info.UpstreamModelName, info.OriginModelName}, "extractUsage", usageContext)
@@ -177,6 +190,13 @@ func (a *TaskAdaptor) ExtractUsageFacts(c *gin.Context, info *relaycommon.RelayI
 }
 
 func (a *TaskAdaptor) ExtractUsageFactsValidated(c *gin.Context, info *relaycommon.RelayInfo) (map[string]any, error) {
+	if a.plugin.Meta.Key == "sora" && info.ChannelType == constant.ChannelTypeOpenAI && info.UpstreamModelName == "minimax-h3" {
+		billingContext, err := a.openAIH3BillingContext(c)
+		if err != nil {
+			return nil, err
+		}
+		return (&grsai.TaskAdaptor{}).ExtractUsageFactsValidated(billingContext, info)
+	}
 	if !a.hasHook(c.Request.Context(), "extractUsage") {
 		return nil, nil
 	}
@@ -222,6 +242,52 @@ func (a *TaskAdaptor) ExtractUsageFactsValidated(c *gin.Context, info *relaycomm
 	return validated, nil
 }
 
+// H3 uses its declared duration/resolution billing contract over the OpenAI
+// wire format as well. The outbound descriptor remains untouched.
+func (a *TaskAdaptor) openAIH3BillingContext(c *gin.Context) (*gin.Context, error) {
+	var body map[string]any
+	if a.submit.BodyType == "multipart" {
+		body = make(map[string]any)
+		for _, part := range a.submit.Parts {
+			if part.FileRef == "" {
+				body[part.Name] = fmt.Sprint(part.Value)
+			}
+		}
+		if metadata, ok := body["metadata"].(string); ok {
+			var parsed map[string]any
+			if err := common.UnmarshalJsonStr(metadata, &parsed); err != nil {
+				return nil, fmt.Errorf("H3 metadata must be a JSON object")
+			}
+			body["metadata"] = parsed
+		}
+	} else if err := convert(a.submit.Body, &body); err != nil {
+		return nil, err
+	}
+	duration := body["seconds"]
+	if duration == nil {
+		duration = body["duration"]
+	}
+	seconds, err := strconv.Atoi(fmt.Sprint(duration))
+	if err != nil {
+		return nil, fmt.Errorf("H3 duration must be whole seconds")
+	}
+	body["duration"] = seconds
+	delete(body, "seconds")
+	var request relaycommon.TaskSubmitReq
+	if err := convert(body, &request); err != nil {
+		return nil, err
+	}
+	if request.Metadata == nil {
+		request.Metadata = map[string]any{}
+	}
+	if request.Metadata["aspect_ratio"] == nil {
+		request.Metadata["aspect_ratio"] = "16:9"
+	}
+	billingContext := &gin.Context{Request: c.Request}
+	billingContext.Set("task_request", request)
+	return billingContext, nil
+}
+
 func (a *TaskAdaptor) AdjustBillingOnSubmit(info *relaycommon.RelayInfo, taskData []byte) map[string]float64 {
 	var data any
 	if err := common.Unmarshal(taskData, &data); err != nil {
@@ -258,12 +324,15 @@ func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, erro
 	return a.submit.URL, pluginruntime.ValidateRequestURL(a.submit.URL, info.ChannelBaseUrl, a.plugin.Meta.AllowedHosts)
 }
 
-func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *relaycommon.RelayInfo) error {
+func (a *TaskAdaptor) BuildRequestHeader(c *gin.Context, req *http.Request, _ *relaycommon.RelayInfo) error {
 	if a.submit == nil {
 		return fmt.Errorf("plugin submit request was not built")
 	}
 	for name, value := range a.submit.Headers {
 		req.Header.Set(name, value)
+	}
+	if a.submit.BodyType == "multipart" {
+		req.Header.Set("Content-Type", c.GetHeader("Content-Type"))
 	}
 	return nil
 }
