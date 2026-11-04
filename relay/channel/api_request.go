@@ -518,6 +518,10 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	modelName := strings.ToLower(info.UpstreamModelName)
+	if common2.IsImageGenerationModel(modelName) || strings.Contains(modelName, "nano-banana") || strings.Contains(modelName, "gemini") && strings.Contains(modelName, "image") {
+		service.BeginMediaDiagnostics(c)
+	}
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
@@ -559,7 +563,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 	}
 
-	resp, err := relayClient.Do(req)
+	resp, err := service.DoMediaDiagnosticRequest(c, &relayClient, req, info.ChannelId)
 	if err != nil {
 		logger.LogError(c, "do request failed: "+err.Error())
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))

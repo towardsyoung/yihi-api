@@ -376,6 +376,7 @@ func InitResources() error {
 	}
 
 	service.StartAuthArtifactCleanup()
+	service.StartMediaDiagnosticCleanup()
 
 	return nil
 }

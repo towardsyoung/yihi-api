@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api, type ApiRequestConfig } from '@/lib/api'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { buildQueryParams } from './lib/query-params'
 import { parseTaskArtifactsResponse } from './lib/task-artifacts'
@@ -124,4 +125,30 @@ export async function getTaskArtifacts(taskId: string) {
     taskArtifactRequestConfig
   )
   return parseTaskArtifactsResponse(response.data)
+}
+
+export interface MediaDiagnostic {
+  id: string
+  request_id: string
+  task_id?: string
+  channel_id: number
+  user_id: number
+  stage: string
+  created_at: number
+  expires_at: number
+  payload: string
+}
+
+export async function getMediaDiagnostics(params: {
+  requestId?: string
+  taskId?: string
+}): Promise<MediaDiagnostic[]> {
+  const response = await api.get<{
+    success: boolean
+    message?: string
+    data: MediaDiagnostic[]
+  }>('/api/task/diagnostics', {
+    params: { request_id: params.requestId, task_id: params.taskId },
+  })
+  return requireServerSuccess(response.data).data
 }

@@ -80,7 +80,7 @@ func (a *TaskAdaptor) fetchUpscaleTask(key, taskID, proxy string) (*http.Respons
 	return nil, fmt.Errorf("upscale task status %d: %s", resp.StatusCode, string(body))
 }
 
-func (a *TaskAdaptor) submitUpscaleTask(key, proxy, videoURL, targetResolution string) (string, []byte, error) {
+func (a *TaskAdaptor) submitUpscaleTask(task *model.Task, key, proxy, videoURL, targetResolution string) (string, []byte, error) {
 	payload := upscaleSubmitRequest{
 		VideoURL:   videoURL,
 		Resolution: targetResolution,
@@ -104,11 +104,13 @@ func (a *TaskAdaptor) submitUpscaleTask(key, proxy, videoURL, targetResolution s
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		service.RecordMediaTaskSubmitDiagnostic(task, req, resp, nil, err)
 		return "", nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
+	service.RecordMediaTaskSubmitDiagnostic(task, req, resp, body, err)
 	if err != nil {
 		return "", nil, err
 	}
@@ -201,7 +203,7 @@ func (a *TaskAdaptor) HandlePostProcessSuccess(ctx context.Context, task *model.
 
 	upscale.SourceVideoURL = taskResult.Url
 	upscale.LastError = ""
-	taskID, _, err := a.submitUpscaleTask(resolveUpscaleAPIKey(upscale, key), proxy, upscale.SourceVideoURL, upscale.TargetResolution)
+	taskID, _, err := a.submitUpscaleTask(task, resolveUpscaleAPIKey(upscale, key), proxy, upscale.SourceVideoURL, upscale.TargetResolution)
 	if err != nil {
 		handleUpscaleRetry(task, err.Error())
 		return true, nil
@@ -238,7 +240,7 @@ func (a *TaskAdaptor) HandlePostProcessFailure(ctx context.Context, task *model.
 		return true, nil
 	}
 
-	taskID, _, err := a.submitUpscaleTask(resolveUpscaleAPIKey(upscale, key), proxy, upscale.SourceVideoURL, upscale.TargetResolution)
+	taskID, _, err := a.submitUpscaleTask(task, resolveUpscaleAPIKey(upscale, key), proxy, upscale.SourceVideoURL, upscale.TargetResolution)
 	if err != nil {
 		upscale.LastError = err.Error()
 		if upscale.RetryCount >= normalizeUpscaleMaxRetries(upscale.MaxRetries) {

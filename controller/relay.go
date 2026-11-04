@@ -22,6 +22,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -34,6 +35,7 @@ func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 	var err *types.NewAPIError
 	switch info.RelayMode {
 	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits:
+		service.BeginMediaDiagnostics(c)
 		err = relay.ImageHelper(c, info)
 	case relayconstant.RelayModeAudioSpeech:
 		fallthrough
@@ -56,6 +58,18 @@ func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 }
 
 func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
+	modelName := strings.ToLower(info.OriginModelName)
+	if strings.Contains(modelName, "image") || strings.Contains(modelName, "nano-banana") {
+		service.BeginMediaDiagnostics(c)
+	}
+	if request, ok := info.Request.(*dto.GeminiChatRequest); ok {
+		for _, modality := range request.GenerationConfig.ResponseModalities {
+			if strings.EqualFold(modality, "IMAGE") {
+				service.BeginMediaDiagnostics(c)
+				break
+			}
+		}
+	}
 	var err *types.NewAPIError
 	if strings.Contains(c.Request.URL.Path, "embed") {
 		err = relay.GeminiEmbeddingHandler(c, info)
@@ -400,6 +414,7 @@ func RelayTaskPluginEndpoint(c *gin.Context, fallback gin.HandlerFunc) {
 	case "openai_responses":
 		serveTaskPluginProtocol(c, pinned, defaultPluginProtocolBridgeDeps())
 	case pluginruntime.ProtocolOpenAIImage:
+		service.BeginMediaDiagnostics(c)
 		serveTaskPluginImageProtocol(c, pinned, defaultPluginProtocolBridgeDeps())
 	default:
 		fallback(c)
@@ -428,6 +443,7 @@ type taskSubmissionOutcome struct {
 }
 
 func RelayTask(c *gin.Context) {
+	service.BeginMediaDiagnostics(c)
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		respondTaskSubmissionError(c, &taskdto.TaskError{
@@ -474,6 +490,7 @@ func executeTaskSubmissionWith(
 	relayInfo *relaycommon.RelayInfo,
 	submit taskSubmitAttempt,
 ) (*taskSubmissionOutcome, *taskdto.TaskError) {
+	service.BeginMediaDiagnostics(c)
 	clientTaskID := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
 	if len(clientTaskID) > 191 {
 		return nil, service.TaskErrorWrapperLocal(errors.New("Idempotency-Key is too long"), "invalid_idempotency_key", http.StatusBadRequest)

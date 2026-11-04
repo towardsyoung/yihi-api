@@ -29,6 +29,7 @@ import { cn } from '@/lib/utils'
 import { taskActionMapper, taskStatusMapper } from '../../lib/mappers'
 import { resolveTaskDetailAccess } from '../../lib/task-details'
 import type { TaskLog } from '../../types'
+import { MediaDiagnostics } from '../media-diagnostics'
 import { PluginAuthorLink } from '../plugin-author-link'
 
 function DetailRow(props: {
@@ -221,6 +222,10 @@ export function TaskDetailsDialog(props: TaskDetailsDialogProps) {
               </>
             ) : null}
           </DetailSection>
+        ) : null}
+
+        {props.isRoot && props.open ? (
+          <MediaDiagnostics taskId={props.log.task_id} />
         ) : null}
 
         {props.isRoot && props.log.root_info ? (

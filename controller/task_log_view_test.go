@@ -1,7 +1,13 @@
 package controller
 
 import (
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -134,4 +140,49 @@ func TestTaskLogDTOKeepsFailureReasonAndDoesNotMarkPluginTaskLegacy(t *testing.T
 	assert.False(t, pluginView.LegacyVideoAvailable)
 	assert.Empty(t, pluginView.ResultURL)
 	assert.Empty(t, pluginView.FailReason)
+}
+
+func TestMediaDiagnosticsRootAccessAndTaskCorrelation(t *testing.T) {
+	task := setupGenericTaskTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.MediaDiagnostic{}))
+	previousLogDB := model.LOG_DB
+	logDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, logDB.AutoMigrate(&model.AuditLog{}))
+	model.LOG_DB = logDB
+	t.Cleanup(func() { model.LOG_DB = previousLogDB; sqlDB, _ := logDB.DB(); sqlDB.Close() })
+	task.PrivateData.Execution = &model.TaskExecutionSnapshot{RequestID: "actual-request"}
+	require.NoError(t, task.Update())
+	now := time.Now().Unix()
+	require.NoError(t, model.SaveMediaDiagnostic(&model.MediaDiagnostic{ID: "linked", RequestID: "actual-request", Payload: `{"prompt":"private-prompt"}`, ExpiresAt: now + 3600}))
+	require.NoError(t, model.SaveMediaDiagnostic(&model.MediaDiagnostic{ID: "expired", RequestID: "actual-request", Payload: `{"prompt":"expired-prompt"}`, ExpiresAt: now - 1}))
+	require.NoError(t, model.SaveMediaDiagnostic(&model.MediaDiagnostic{ID: "unrelated", RequestID: "unrelated-request", Payload: `{"prompt":"unrelated-prompt"}`, ExpiresAt: now + 3600}))
+	for _, role := range []int{0, common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/task/diagnostics?task_id=task_generic&request_id=unrelated-request", nil)
+		c.Set("role", role)
+		c.Set("id", 7)
+		GetMediaDiagnostics(c)
+		assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+		if role < common.RoleRootUser {
+			assert.Equal(t, http.StatusForbidden, recorder.Code)
+			assert.NotContains(t, recorder.Body.String(), "private-prompt")
+			continue
+		}
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "private-prompt")
+		assert.NotContains(t, recorder.Body.String(), "expired-prompt")
+		assert.NotContains(t, recorder.Body.String(), "unrelated-prompt")
+	}
+	var audit model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "media_diagnostics.read").First(&audit).Error)
+	assert.Equal(t, common.RoleRootUser, audit.ActorRole)
+	assert.NotContains(t, audit.Content, "private-prompt")
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/task/diagnostics", nil)
+	c.Set("role", common.RoleRootUser)
+	GetMediaDiagnostics(c)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 }

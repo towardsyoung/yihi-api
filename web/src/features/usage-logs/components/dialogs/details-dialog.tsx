@@ -88,6 +88,7 @@ import {
   isTimingLogType,
 } from '../../lib/utils'
 import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
+import { MediaDiagnostics } from '../media-diagnostics'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { DetailRow, DetailSection } from './log-detail-layout'
@@ -910,6 +911,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
               />
             ) : null}
           </DetailSection>
+        ) : null}
+
+        {props.isRoot && props.open && props.log.request_id ? (
+          <MediaDiagnostics requestId={props.log.request_id} />
         ) : null}
 
         {props.isRoot && other?.root_info ? (
