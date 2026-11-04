@@ -10,16 +10,158 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func TestYunqiaoLegacyVideoEntry(t *testing.T) {
+	previousDB, previousRegistry, previousCache := model.DB, jsplugin.DefaultRegistry, common.MemoryCacheEnabled
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.Task{}))
+	model.DB, jsplugin.DefaultRegistry, common.MemoryCacheEnabled = db, jsplugin.NewRegistry(), true
+	t.Cleanup(func() {
+		model.DB, jsplugin.DefaultRegistry, common.MemoryCacheEnabled = previousDB, previousRegistry, previousCache
+		if previousDB != nil {
+			model.InitChannelCache()
+		}
+		require.NoError(t, sqlDB.Close())
+	})
+	source, err := builtinplugins.Source("yunqiao")
+	require.NoError(t, err)
+	plugin, err := jsplugin.DefaultRegistry.RegisterFactory(source, jsplugin.Options{Key: "yunqiao"})
+	require.NoError(t, err)
+	channels := []model.Channel{
+		{Id: 35, Type: constant.ChannelTypeGrsai, Name: "Grsai", Status: common.ChannelStatusEnabled, Priority: common.GetPointer(int64(8)), Models: "minimax-h3", Group: "yihi_default", Key: "test-key"},
+		{Id: 37, Type: constant.ChannelTypeTaskPlugin, Name: "Yunqiao", Status: common.ChannelStatusEnabled, Priority: common.GetPointer(int64(9)), Models: "minimax-h3", Group: "yihi_default", Key: "test-key", Setting: common.GetPointer(`{"task_plugin_key":"yunqiao"}`)},
+		{Id: 38, Type: constant.ChannelTypeTaskPlugin, Name: "Unsupported", Status: common.ChannelStatusEnabled, Priority: common.GetPointer(int64(99)), Models: "minimax-h3", Group: "yihi_default", Key: "test-key", Setting: common.GetPointer(`{"task_plugin_key":"not-a-video-plugin"}`)},
+	}
+	for i := range channels {
+		require.NoError(t, db.Create(&channels[i]).Error)
+		require.NoError(t, db.Create(&model.Ability{ChannelId: channels[i].Id, Group: "yihi_default", Model: "minimax-h3", Enabled: true, Priority: channels[i].Priority}).Error)
+	}
+	model.InitChannelCache()
+	request := `{"model":"minimax-h3","prompt":"animate the reference","duration":5,"images":["https://example.com/reference.png"],"metadata":{"resolution":"768p","aspect_ratio":"16:9","generate_audio":false,"audios":[]}}`
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/video/generations", bytes.NewBufferString(request))
+	c.Request.Header.Set("Content-Type", "application/json")
+	service.AppendTaskPluginIdentityFilter(c, "")
+	filters := service.GetChannelConstraints(c).Filters
+	selected, err := model.GetRandomSatisfiedChannel("yihi_default", "minimax-h3", 0, filters)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, 37, selected.Id, "plugin joins the normal priority selection")
+	native, err := model.GetRandomSatisfiedChannel("yihi_default", "minimax-h3", 1, filters)
+	require.NoError(t, err)
+	require.NotNil(t, native)
+	assert.Equal(t, 35, native.Id, "native fallback remains eligible")
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, selected, "minimax-h3"))
+	assert.Equal(t, constant.TaskPlatform("yunqiao"), relay.GetTaskPlatform(c))
+	info := &relaycommon.RelayInfo{OriginModelName: "minimax-h3", ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeTaskPlugin, UpstreamModelName: "minimax-h3", ChannelBaseUrl: "https://provider.example", ApiKey: "test-key"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	adaptor := taskplugin.New(plugin)
+	adaptor.Init(info)
+	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
+	assert.Equal(t, "image_to_video", info.Action)
+	reader, err := adaptor.BuildRequestBody(c, info)
+	require.NoError(t, err)
+	var outbound map[string]any
+	require.NoError(t, common.DecodeJson(reader, &outbound))
+	assert.Equal(t, map[string]any{
+		"model": "minimax-h3", "prompt": "animate the reference", "seconds": float64(5), "input_reference": "https://example.com/reference.png",
+		"resolution": "768p", "ratio": "16:9", "generate_audio": false,
+		"metadata": map[string]any{"resolution": "768p", "aspect_ratio": "16:9", "generate_audio": false, "audios": []any{}},
+	}, outbound)
+	facts, err := adaptor.ExtractUsageFactsValidated(c, info)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"seconds": float64(5), "resolution": "768p", "video_input": "none"}, facts)
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "multiple images", body: `{"images":["https://example.com/one.png","https://example.com/two.png"]}`},
+		{name: "conflicting references", body: `{"images":["https://example.com/one.png"],"input_reference":"https://example.com/two.png"}`},
+		{name: "reference audio", body: `{"metadata":{"resolution":"768p","audios":["https://example.com/voice.mp3"]}}`},
+		{name: "oversized duration", body: `{"duration":3601}`},
+		{name: "conflicting duration", body: `{"duration":5,"seconds":6}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{"model": "minimax-h3", "prompt": "animate the reference", "duration": 5, "metadata": map[string]any{"resolution": "768p"}}
+			var overrides map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(tc.body, &overrides))
+			for key, value := range overrides {
+				body[key] = value
+			}
+			encoded, err := common.Marshal(body)
+			require.NoError(t, err)
+			invalid, _ := gin.CreateTestContext(httptest.NewRecorder())
+			invalid.Request = httptest.NewRequest(http.MethodPost, "/v1/video/generations", bytes.NewReader(encoded))
+			invalid.Request.Header.Set("Content-Type", "application/json")
+			driver := taskplugin.New(plugin)
+			driver.Init(info)
+			taskErr := driver.ValidateRequestAndSetAction(invalid, info)
+			require.NotNil(t, taskErr)
+			assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
+		})
+	}
+
+	// A retry to Grsai must not reuse the previous plugin identity.
+	c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Generation: jsplugin.DefaultRegistry.Generation(), Plugin: plugin})
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, native, "minimax-h3"))
+	assert.Equal(t, constant.TaskPlatform("64"), relay.GetTaskPlatform(c))
+	assert.Nil(t, service.TaskExecutionSnapshotFromContext(c).TaskPlugin)
+	require.NoError(t, db.Model(&channels[0]).Update("priority", 10).Error)
+	model.InitChannelCache()
+	higherNative, err := model.GetRandomSatisfiedChannel("yihi_default", "minimax-h3", 0, filters)
+	require.NoError(t, err)
+	require.NotNil(t, higherNative)
+	assert.Equal(t, 35, higherNative.Id, "native and plugin priorities share one ordering")
+
+	require.NoError(t, db.Model(&channels[0]).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	model.InitChannelCache()
+	selected, err = model.GetRandomSatisfiedChannel("yihi_default", "minimax-h3", 0, filters)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, 37, selected.Id, "disabling Grsai still leaves Yunqiao available")
+
+	ordinary, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ordinary.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(request))
+	service.AppendTaskPluginIdentityFilter(ordinary, "")
+	allowed, _ := model.ChannelSatisfiesFilters(selected, "minimax-h3", service.GetChannelConstraints(ordinary).Filters)
+	assert.False(t, allowed, "ordinary traffic must not select a video-only plugin")
+
+	task := &model.Task{TaskID: "task_legacy_yunqiao", UserId: 2, Platform: "yunqiao", ChannelId: 37, Status: model.TaskStatusSuccess, Properties: model.Properties{OriginModelName: "minimax-h3"}, PrivateData: model.TaskPrivateData{UpstreamTaskID: "private-id", ResultURL: "https://example.com/video.mp4"}}
+	require.NoError(t, db.Create(task).Error)
+	recorder := httptest.NewRecorder()
+	query, _ := gin.CreateTestContext(recorder)
+	query.Request = httptest.NewRequest(http.MethodGet, "/v1/video/generations/task_legacy_yunqiao", nil)
+	query.Params = gin.Params{{Key: "task_id", Value: task.TaskID}}
+	query.Set("id", 2)
+	require.Nil(t, relay.RelayTaskFetch(query, relayconstant.RelayModeVideoFetchByID))
+	var response map[string]any
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, "success", response["code"])
+	data := response["data"].(map[string]any)
+	assert.Equal(t, "SUCCESS", data["status"])
+	assert.Equal(t, "https://example.com/video.mp4", data["result_url"])
+	assert.NotContains(t, data, "private_data")
+}
 
 func TestYunqiaoResponsesProtocol(t *testing.T) {
 	testVideoResponsesProtocol(t, videoResponsesTestCase{

@@ -547,6 +547,16 @@ func getTaskOriginModelName(c *gin.Context) string {
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
 	c.Set("original_model", modelName) // for retry
+	if c.Request != nil && c.Request.URL.Path == "/v1/video/generations" {
+		if _, pinned := c.Get(jsplugin.ContextKeyPinnedEndpoint); !pinned {
+			// A retry can move between a native driver and a task plugin.
+			// Each driver decodes the original body again for its own attempt.
+			c.Set("task_plugin_key", "")
+			c.Set("platform", "")
+			c.Set("task_action", "")
+			c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{})
+		}
+	}
 	expectedPlugin := c.GetString("expected_task_plugin_key")
 	if channel == nil {
 		logTaskPluginChannelDecision(c, nil, modelName, "channel_rejected", "nil_channel")

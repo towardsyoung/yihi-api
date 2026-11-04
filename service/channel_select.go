@@ -33,6 +33,26 @@ func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {
 		return
 	}
 	channelTypes, pluginKeys := pinnedTaskPluginIdentities(c, pluginKey)
+	// The legacy video entry selects native and plugin channels together.
+	// Only plugins claiming the video protocol may join that candidate set;
+	// their decoder runs after selection, against the original request.
+	if pluginKey == "" && c.Request != nil && c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/video/generations" {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := common.UnmarshalBodyReusable(c, &request); err == nil {
+			generation := jsplugin.DefaultRegistry.Generation()
+			lookupModel := request.Model
+			if declared, ok := generation.CanonicalModel(lookupModel); ok {
+				lookupModel = declared
+			} else if target, ok := model.ResolveTaskModelAlias(generation, lookupModel); ok {
+				lookupModel = target.Declared
+			}
+			for _, candidate := range generation.LookupEndpointCandidates(http.MethodPost, "/v1/videos", lookupModel) {
+				pluginKeys = append(pluginKeys, candidate.Plugin.Meta.Key)
+			}
+		}
+	}
 	GetChannelConstraints(c).AddFilter(dto.ChannelFilter{
 		Kind:                   dto.FilterTaskPluginIdentity,
 		TaskPluginKey:          pluginKey,

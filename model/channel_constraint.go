@@ -100,7 +100,7 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 		return config != nil && config.SupportsPathForModel(filter.RequestPath, modelName)
 	case dto.FilterTaskPluginIdentity:
 		if filter.TaskPluginKey == "" {
-			return ch.Type != constant.ChannelTypeTaskPlugin
+			return ch.Type != constant.ChannelTypeTaskPlugin || slices.ContainsFunc(filter.TaskPluginKeys, ch.GetSetting().BindsTaskPlugin)
 		}
 		if ch.Type == constant.ChannelTypeTaskPlugin || ch.Type == constant.ChannelTypeNewAPI {
 			// A New API channel serves every plugin it is extended with; the

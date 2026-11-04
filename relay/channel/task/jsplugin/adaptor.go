@@ -94,6 +94,36 @@ func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{
 func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo)   { a.info = info }
 
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	if c.Request.URL.Path == "/v1/video/generations" && info.ChannelType == constant.ChannelTypeTaskPlugin {
+		var body map[string]any
+		if err := common.UnmarshalBodyReusable(c, &body); err != nil {
+			return service.TaskErrorWrapperLocal(err, "plugin_request_invalid", http.StatusBadRequest)
+		}
+		request := pluginruntime.ProtocolRequestContext{
+			RouteRequestContext: pluginruntime.RouteRequestContext{Path: c.Request.URL.Path, Method: c.Request.Method, Body: map[string]any{"kind": "json", "value": body}},
+			Protocol:            "openai_video", Operation: "create", Model: info.OriginModelName, UpstreamModel: info.UpstreamModelName,
+		}
+		value, err := a.plugin.Engine.CallPath(c.Request.Context(), "protocols", []string{"openai_video", "decodeRequest"}, request.JSValue())
+		if err != nil {
+			return service.TaskErrorWrapperLocal(err, "plugin_request_invalid", http.StatusBadRequest)
+		}
+		resolved, ok := value.(map[string]any)
+		if !ok || resolved["kind"] != "submit" || resolved["model"] != info.OriginModelName {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("video decoder rejected the selected model"), "plugin_request_invalid", http.StatusBadRequest)
+		}
+		if _, forbidden := resolved["renderer"]; forbidden {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("decoder must not return renderer"), "plugin_request_invalid", http.StatusBadRequest)
+		}
+		if refs, exists := resolved["originTaskIds"]; exists {
+			if ids, ok := refs.([]any); !ok || len(ids) > 0 {
+				return service.TaskErrorWrapperLocal(fmt.Errorf("origin tasks require the plugin protocol endpoint"), "plugin_request_invalid", http.StatusBadRequest)
+			}
+		}
+		c.Set("task_request", resolved["requestBody"])
+		if action, ok := resolved["action"].(string); ok {
+			info.Action = action
+		}
+	}
 	if pinnedValue, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
 		if pinned, ok := pinnedValue.(pluginruntime.PinnedEndpoint); ok && pinned.Plugin == a.plugin {
 			if protocolValue, present := c.Get(pluginruntime.ContextKeyProtocolRequest); present {

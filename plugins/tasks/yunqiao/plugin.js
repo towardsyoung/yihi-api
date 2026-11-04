@@ -7,7 +7,7 @@ export const meta = {
     en: "Yunqiao asynchronous text-to-video and image-to-video generation",
     zh: "云桥异步文生视频和图生视频",
   },
-  version: "1.1.0",
+  version: "1.1.1",
   author: { name: "QuantumNous" },
   website: "https://nextrun.top/docs#videos",
   baseUrl: "https://asiasouth.up.railway.app",
@@ -46,6 +46,25 @@ function normalizeRequest(req, model) {
     throw new Error("seconds and duration must match");
   const values = Object.assign({}, req, { model: model, seconds: Number(req.seconds === undefined ? (req.duration === undefined ? 5 : req.duration) : req.seconds) });
   delete values.duration;
+  if (values.images !== undefined) {
+    if (!Array.isArray(values.images) || values.images.some(function (image) { return typeof image !== "string" || !image.trim(); }))
+      throw new Error("images must be an array of image URLs");
+    if (values.images.length > 1) throw new Error("Yunqiao supports one input_reference image");
+    if (values.images.length) {
+      if (values.input_reference || values.image) throw new Error("provide only one reference image");
+      values.input_reference = values.images[0];
+    }
+    delete values.images;
+  }
+  if (values.metadata !== undefined) {
+    const metadata = values.metadata;
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) throw new Error("metadata must be an object");
+    if (values.resolution === undefined && metadata.resolution !== undefined) values.resolution = metadata.resolution;
+    if (values.ratio === undefined && metadata.aspect_ratio !== undefined) values.ratio = metadata.aspect_ratio;
+    if (values.generate_audio === undefined && metadata.generate_audio !== undefined) values.generate_audio = metadata.generate_audio;
+    if (metadata.audios !== undefined && (!Array.isArray(metadata.audios) || metadata.audios.length))
+      throw new Error("Yunqiao reference audio is not supported");
+  }
   if (values.input_reference && values.image) throw new Error("provide only one reference image");
   if (values.image !== undefined) {
     values.input_reference = values.image;

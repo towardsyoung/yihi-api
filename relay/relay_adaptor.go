@@ -231,7 +231,9 @@ func getTaskAdaptorForRequest(c *gin.Context, platform constant.TaskPlatform) (c
 				platform = constant.TaskPlatform(pinned.Plugin.Meta.Key)
 				return platform, jspluginadaptor.New(pinned.Plugin)
 			}
-			return platform, nil
+			if c.Request == nil || c.Request.URL.Path != "/v1/video/generations" {
+				return platform, nil
+			}
 		}
 		if value, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
 			if pinned, ok := value.(pluginruntime.PinnedEndpoint); ok && pinned.Plugin != nil {
