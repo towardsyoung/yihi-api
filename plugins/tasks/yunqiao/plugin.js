@@ -7,7 +7,7 @@ export const meta = {
     en: "Yunqiao asynchronous text-to-video and image-to-video generation",
     zh: "云桥异步文生视频和图生视频",
   },
-  version: "1.1.2",
+  version: "1.2.0",
   author: { name: "QuantumNous" },
   website: "https://nextrun.top/docs#videos",
   baseUrl: "https://asiasouth.up.railway.app",
@@ -46,16 +46,23 @@ function normalizeRequest(req, model) {
     throw new Error("seconds and duration must match");
   const values = Object.assign({}, req, { model: model, seconds: Number(req.seconds === undefined ? (req.duration === undefined ? 5 : req.duration) : req.seconds) });
   delete values.duration;
-  if (values.images !== undefined) {
-    if (!Array.isArray(values.images) || values.images.some(function (image) { return typeof image !== "string" || !image.trim(); }))
-      throw new Error("images must be an array of image URLs");
-    if (values.images.length > 1) throw new Error("Yunqiao supports one input_reference image");
-    if (values.images.length) {
-      if (values.input_reference || values.image) throw new Error("provide only one reference image");
-      values.input_reference = values.images[0];
-    }
-    delete values.images;
+  if (values.images !== undefined && values.image_urls !== undefined) throw new Error("provide either images or image_urls");
+  let images = values.image_urls === undefined ? values.images : values.image_urls;
+  if (images !== undefined && (!Array.isArray(images) || images.some(function (image) { return typeof image !== "string" || !image.trim(); })))
+    throw new Error("image_urls must be an array of non-empty image URLs");
+  if (values.input_reference !== undefined && values.image !== undefined) throw new Error("provide reference images through one field");
+  const singleImage = values.input_reference === undefined ? values.image : values.input_reference;
+  if (singleImage !== undefined) {
+    if (typeof singleImage !== "string" || !singleImage.trim()) throw new Error("input_reference must be a non-empty string; upload files with multipart");
+    if (images && images.length) throw new Error("provide reference images through one field");
+    images = [singleImage];
   }
+  // Match the host image-count ceiling, not a claimed vendor/model limit.
+  if (images && images.length > 128) throw new Error("at most 128 image URLs are allowed");
+  if (images !== undefined) values.image_urls = images.slice();
+  delete values.images;
+  delete values.image;
+  delete values.input_reference;
   if (values.metadata !== undefined) {
     const metadata = values.metadata;
     if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) throw new Error("metadata must be an object");
@@ -65,13 +72,6 @@ function normalizeRequest(req, model) {
     if (metadata.audios !== undefined && (!Array.isArray(metadata.audios) || metadata.audios.length))
       throw new Error("Yunqiao reference audio is not supported");
   }
-  if (values.input_reference && values.image) throw new Error("provide only one reference image");
-  if (values.image !== undefined) {
-    values.input_reference = values.image;
-    delete values.image;
-  }
-  if (values.input_reference !== undefined && (typeof values.input_reference !== "string" || !values.input_reference.trim()))
-    throw new Error("input_reference must be a string; upload files with multipart");
   return values;
 }
 
@@ -174,14 +174,13 @@ export function buildQuoteRequest(ctx) {
   const p = ctx.parameters;
   if (p.type !== "video") throw new Error("Yunqiao only supports video quotes");
   if (p.hasReferenceVideo) throw new Error("Yunqiao reference video quotes are not supported");
-  if (p.referenceImageCount > 1) throw new Error("Yunqiao supports one input_reference image");
   const req = Object.assign({}, p.options || {}, { model: ctx.upstreamModel, prompt: "quote", seconds: p.duration });
   if (p.resolution) req.resolution = p.resolution;
   if (p.aspectRatio) req.ratio = p.aspectRatio;
   if (p.quality) req.quality = p.quality;
   if (p.size) req.size = p.size;
   if (p.audio !== undefined) req.generate_audio = p.audio;
-  if (p.referenceImageCount) req.input_reference = "https://quote.invalid/reference";
+  if (p.referenceImageCount) req.image_urls = Array.from({ length: p.referenceImageCount }, function () { return "https://quote.invalid/reference"; });
   return { requestBody: normalizeRequest(req, ctx.upstreamModel), action: p.referenceImageCount ? "image_to_video" : "text_to_video" };
 }
 
@@ -242,19 +241,22 @@ export const protocols = {
       const model = trimmed(req.model);
       if (!model) throw new Error("model is required");
       if (req.input !== undefined && typeof req.input !== "string" && !Array.isArray(req.input)) throw new Error("input must be a string or array");
-      if (req.images !== undefined && !Array.isArray(req.images)) throw new Error("images must be an array");
+      for (const key of ["images", "image_urls"]) {
+        if (req[key] !== undefined && !Array.isArray(req[key])) throw new Error(key + " must be an array");
+      }
       if (req.metadata !== undefined && (!req.metadata || typeof req.metadata !== "object" || Array.isArray(req.metadata)))
         throw new Error("metadata must be an object");
       const input = responsesInput(req);
       const prompt = input.prompt || trimmed(req.prompt);
       if (!prompt) throw new Error("input is required");
       const images = [];
-      for (const image of [req.image, req.input_reference].concat(req.images || [], input.images)) {
-        if (trimmed(image) && !images.includes(trimmed(image))) images.push(trimmed(image));
+      for (const image of [req.image, req.input_reference].concat(req.image_urls || [], req.images || [], input.images)) {
+        if (image === undefined) continue;
+        if (typeof image !== "string" || !image.trim()) throw new Error("reference images must be non-empty URL strings");
+        if (!images.includes(image)) images.push(image);
       }
       const requestBody = { model: model, prompt: prompt };
-      if (images.length > 1) throw new Error("provide only one reference image");
-      if (images.length) requestBody.input_reference = images[0];
+      if (images.length) requestBody.image_urls = images;
       if (Object.prototype.hasOwnProperty.call(req, "seconds")) requestBody.seconds = req.seconds;
       if (Object.prototype.hasOwnProperty.call(req, "duration")) requestBody.duration = req.duration;
       for (const key of ["size", "ratio", "resolution", "quality", "generate_audio"]) {
@@ -301,7 +303,7 @@ protocols.openai_video = {
     if (!ctx.body || (ctx.body.kind !== "json" && ctx.body.kind !== "multipart")) throw new Error("JSON or multipart body required");
     if (ctx.body.kind === "json") {
       const req = normalizeRequest(ctx.body.value, ctx.model);
-      return { kind: "submit", model: ctx.model, action: req.input_reference ? "image_to_video" : "text_to_video", requestBody: req };
+      return { kind: "submit", model: ctx.model, action: req.image_urls && req.image_urls.length ? "image_to_video" : "text_to_video", requestBody: req };
     }
     const first = function (name) {
       const values = (ctx.body.fields || {})[name] || [];
@@ -330,11 +332,11 @@ protocols.openai_video = {
       req.metadata = parsed;
     }
     const normalized = normalizeRequest(req, ctx.model);
-    if (hasInputReferenceFile && normalized.input_reference) throw new Error("provide only one reference image");
+    if (hasInputReferenceFile && normalized.image_urls && normalized.image_urls.length) throw new Error("provide reference images through one field");
     return {
       kind: "submit",
       model: ctx.model,
-      action: hasInputReferenceFile || normalized.input_reference ? "image_to_video" : "text_to_video",
+      action: hasInputReferenceFile || (normalized.image_urls && normalized.image_urls.length) ? "image_to_video" : "text_to_video",
       requestBody: normalized,
     };
   },

@@ -63,7 +63,7 @@ func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 		require.NoError(t, db.Create(&model.Ability{ChannelId: channels[i].Id, Group: "yihi_default", Model: "minimax-h3", Enabled: true, Priority: channels[i].Priority}).Error)
 	}
 	model.InitChannelCache()
-	request := `{"model":"minimax-h3","prompt":"animate the reference","duration":5,"images":["https://example.com/reference.png"],"metadata":{"resolution":"768p","aspect_ratio":"16:9","generate_audio":false,"audios":[]}}`
+	request := `{"model":"minimax-h3","prompt":"animate the reference","duration":5,"images":["https://example.com/person.png","https://example.com/scene.png"],"metadata":{"resolution":"768p","aspect_ratio":"16:9","generate_audio":false,"audios":[]}}`
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/video/generations", bytes.NewBufferString(request))
 	c.Request.Header.Set("Content-Type", "application/json")
@@ -89,7 +89,7 @@ func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 	var outbound map[string]any
 	require.NoError(t, common.DecodeJson(reader, &outbound))
 	assert.Equal(t, map[string]any{
-		"model": "minimax-h3", "prompt": "animate the reference", "seconds": "5", "input_reference": "https://example.com/reference.png",
+		"model": "minimax-h3", "prompt": "animate the reference", "seconds": "5", "image_urls": []any{"https://example.com/person.png", "https://example.com/scene.png"},
 		"resolution": "768p", "ratio": "16:9", "generate_audio": false,
 		"metadata": map[string]any{"resolution": "768p", "aspect_ratio": "16:9", "generate_audio": false, "audios": []any{}},
 	}, outbound)
@@ -100,7 +100,7 @@ func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "multiple images", body: `{"images":["https://example.com/one.png","https://example.com/two.png"]}`},
+		{name: "invalid image URL", body: `{"images":["https://example.com/one.png",null]}`},
 		{name: "conflicting references", body: `{"images":["https://example.com/one.png"],"input_reference":"https://example.com/two.png"}`},
 		{name: "reference audio", body: `{"metadata":{"resolution":"768p","audios":["https://example.com/voice.mp3"]}}`},
 		{name: "oversized duration", body: `{"duration":3601}`},
@@ -229,6 +229,70 @@ func TestYunqiaoVideoContract(t *testing.T) {
 		require.NoError(t, common.Unmarshal(encoded, &result))
 		return result, nil
 	}
+	t.Run("JSON image aliases use the verified image_urls contract", func(t *testing.T) {
+		urls := []any{"https://example.com/person.png", "https://example.com/scene.png"}
+		for _, tc := range []struct {
+			name string
+			body map[string]any
+			want []any
+		}{
+			{name: "provider array", body: map[string]any{"image_urls": urls}, want: urls},
+			{name: "legacy array", body: map[string]any{"images": urls}, want: urls},
+			{name: "single input reference", body: map[string]any{"input_reference": urls[0]}, want: urls[:1]},
+			{name: "single image", body: map[string]any{"image": urls[0]}, want: urls[:1]},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tc.body["prompt"], tc.body["duration"] = "animate both references", 4
+				intent, err := decode(t, map[string]any{"kind": "json", "value": tc.body})
+				require.NoError(t, err)
+				assert.Equal(t, "image_to_video", intent["action"])
+				value, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", map[string]any{"model": "my-video", "upstreamModel": "minimax-h3", "baseUrl": "https://provider.example", "apiKey": "test-key", "requestBody": intent["requestBody"]})
+				require.NoError(t, err)
+				encoded, err := common.Marshal(value.(map[string]any)["body"])
+				require.NoError(t, err)
+				var body map[string]any
+				require.NoError(t, common.Unmarshal(encoded, &body))
+				assert.Equal(t, tc.want, body["image_urls"])
+				assert.Equal(t, "4", body["seconds"])
+				for _, alias := range []string{"images", "image", "input_reference"} {
+					assert.NotContains(t, body, alias)
+				}
+			})
+		}
+		oversized := make([]string, 129)
+		for i := range oversized {
+			oversized[i] = "https://example.com/image.png"
+		}
+		for _, invalid := range []any{"https://example.com/image.png", []any{""}, []any{nil}, oversized} {
+			_, err := decode(t, map[string]any{"kind": "json", "value": map[string]any{"prompt": "waves", "image_urls": invalid}})
+			require.Error(t, err)
+		}
+	})
+	t.Run("Responses and quotes preserve multiple image references", func(t *testing.T) {
+		urls := []any{"https://example.com/person.png", "https://example.com/scene.png"}
+		value, err := plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_responses", "decodeRequest"}, map[string]any{"model": "minimax-h3", "body": map[string]any{"kind": "json", "value": map[string]any{
+			"model": "minimax-h3", "input": []any{map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "input_text", "text": "animate both references"}, map[string]any{"type": "input_image", "image_url": urls[0]}, map[string]any{"type": "input_image", "image_url": urls[1]},
+			}}}, "seconds": "4", "resolution": "480p",
+		}}})
+		require.NoError(t, err)
+		intent := value.(map[string]any)
+		assert.Equal(t, "image_to_video", intent["action"])
+		body := intent["requestBody"].(map[string]any)
+		encoded, err := common.Marshal(body["image_urls"])
+		require.NoError(t, err)
+		assert.JSONEq(t, `["https://example.com/person.png","https://example.com/scene.png"]`, string(encoded))
+		quote, err := plugin.Engine.Call(t.Context(), "buildQuoteRequest", map[string]any{"model": "minimax-h3", "upstreamModel": "minimax-h3", "parameters": map[string]any{"type": "video", "duration": 4, "resolution": "480p", "referenceImageCount": 2}})
+		require.NoError(t, err)
+		quoteBody := quote.(map[string]any)["requestBody"].(map[string]any)
+		assert.Len(t, quoteBody["image_urls"], 2)
+		driver := taskplugin.New(plugin)
+		facts, _, err := driver.ExtractQuoteUsage(t.Context(), quoteBody, "minimax-h3", "minimax-h3", "image_to_video", "facts")
+		require.NoError(t, err)
+		actual, _, err := driver.ExtractQuoteUsage(t.Context(), body, "minimax-h3", "minimax-h3", "image_to_video", "facts")
+		require.NoError(t, err)
+		assert.Equal(t, actual, facts)
+	})
 	t.Run("Responses preserves optional audio through submission", func(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
