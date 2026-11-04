@@ -189,6 +189,31 @@ func (a *TaskAdaptor) ExtractUsageFacts(c *gin.Context, info *relaycommon.RelayI
 	return facts
 }
 
+// ExtractQuoteUsage runs only the pure usage hook, with the same request and
+// fact validation as submission. It never builds/sends an upstream request or
+// runs completion hooks (which may need actual generated media).
+func (a *TaskAdaptor) ExtractQuoteUsage(ctx context.Context, request map[string]any, model, upstreamModel, action, purpose string) (map[string]any, map[string]float64, error) {
+	if err := a.validateResolvedUsageRequest(request, upstreamModel, model); err != nil {
+		return nil, nil, err
+	}
+	if !a.hasHook(ctx, "extractUsage") {
+		return nil, nil, fmt.Errorf("provider has no request usage meter")
+	}
+	value, err := a.plugin.Engine.Call(ctx, "extractUsage", map[string]any{
+		"model": model, "upstreamModel": upstreamModel, "action": action,
+		"requestBody": request, "requestHeaders": map[string]string{},
+		"files": []any{}, "usagePurpose": purpose,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("provider usage extraction failed: %w", err)
+	}
+	facts, ok := value.(map[string]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("provider returned no request usage facts")
+	}
+	return a.validatedUsageRatios(facts, upstreamModel, model)
+}
+
 func (a *TaskAdaptor) ExtractUsageFactsValidated(c *gin.Context, info *relaycommon.RelayInfo) (map[string]any, error) {
 	if a.plugin.Meta.Key == "sora" && info.ChannelType == constant.ChannelTypeOpenAI && info.UpstreamModelName == "minimax-h3" {
 		billingContext, err := a.openAIH3BillingContext(c)

@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel/task/grsai"
+	taskplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -27,16 +28,18 @@ import (
 )
 
 type dramaMediaItem struct {
-	Model               string  `json:"model"`
-	Type                string  `json:"type"`
-	Resolution          string  `json:"resolution"`
-	Duration            float64 `json:"duration"`
-	Count               int     `json:"count"`
-	AspectRatio         string  `json:"aspectRatio"`
-	Quality             string  `json:"quality"`
-	Size                string  `json:"size"`
-	HasReferenceVideo   bool    `json:"hasReferenceVideo"`
-	ReferenceImageCount *int    `json:"referenceImageCount"`
+	Model               string         `json:"model"`
+	Type                string         `json:"type"`
+	Resolution          string         `json:"resolution"`
+	Duration            float64        `json:"duration"`
+	Count               int            `json:"count"`
+	AspectRatio         string         `json:"aspectRatio"`
+	Quality             string         `json:"quality"`
+	Size                string         `json:"size"`
+	HasReferenceVideo   bool           `json:"hasReferenceVideo"`
+	ReferenceImageCount *int           `json:"referenceImageCount"`
+	Audio               *bool          `json:"audio,omitempty"`
+	Options             map[string]any `json:"options,omitempty"`
 }
 
 // Quotes are read-only. Missing provider meters or unknown output tokens are
@@ -86,6 +89,7 @@ func DramaMediaQuote(c *gin.Context) {
 		result := gin.H{"status": "unavailable", "reason": "no supported billing meter or available channel", "effectiveParameters": item, "estimatedAt": now, "unit": "request"}
 		var quotas []int
 		var fingerprints []string
+		channelErrors := make([]gin.H, 0)
 		complete := true
 		for _, ability := range abilities {
 			if ability.Group != group || ability.Model != item.Model {
@@ -96,12 +100,16 @@ func DramaMediaQuote(c *gin.Context) {
 			}
 			ch, e := model.GetChannelById(ability.ChannelId, false)
 			if e != nil {
+				channelErrors = append(channelErrors, gin.H{"channelId": ability.ChannelId, "reason": "channel is unavailable"})
+				fingerprints = append(fingerprints, fmt.Sprint(ability.ChannelId, ":unavailable"))
 				complete = false
 				continue
 			}
 			q, version, e := quoteDramaMediaChannel(item, ch, ratio)
 			if e != nil {
 				result["reason"] = e.Error()
+				channelErrors = append(channelErrors, gin.H{"channelId": ch.Id, "reason": e.Error()})
+				fingerprints = append(fingerprints, fmt.Sprint(ch.Id, ":", e.Error()))
 				complete = false
 				continue
 			}
@@ -111,6 +119,15 @@ func DramaMediaQuote(c *gin.Context) {
 		slices.Sort(fingerprints)
 		version := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprint(group, ratio, common.QuotaPerUnit, fingerprints))))
 		result["pricingVersion"] = version
+		result["complete"] = complete && len(quotas) > 0
+		if len(channelErrors) > 0 {
+			result["channelErrors"] = channelErrors
+		}
+		if len(quotas) > 0 && !complete {
+			// Known prices are diagnostic only; clients must not display these
+			// as a complete quote for a request that can use an unpriced channel.
+			result["partialQuote"] = gin.H{"minQuota": slices.Min(quotas), "maxQuota": slices.Max(quotas), "channelCount": len(quotas)}
+		}
 		versions = append(versions, version)
 		if len(quotas) > 0 && complete {
 			lo, hi := slices.Min(quotas), slices.Max(quotas)
@@ -146,6 +163,9 @@ func validateDramaMediaItem(item dramaMediaItem) error {
 }
 
 func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float64) (int, string, error) {
+	if err := validateDramaMediaItem(item); err != nil {
+		return 0, "", err
+	}
 	if len(ch.GetParamOverride()) > 0 {
 		return 0, "", fmt.Errorf("channel parameter overrides require an execution meter")
 	}
@@ -167,6 +187,23 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 			plugin = loaded.Meta.Key
 		}
 	}
+	if ch.Type == constant.ChannelTypeNewAPI {
+		// Match the host protocol distributor's first bound candidate order.
+		path := "/v1/videos"
+		if item.Type == "image" {
+			path = "/v1/images/generations"
+		}
+		loaded, loadedOK = nil, false
+		for _, candidate := range jsplugin.DefaultRegistry.Generation().LookupEndpointCandidates("POST", path, item.Model) {
+			if ch.GetSetting().BindsTaskPlugin(candidate.Plugin.Meta.Key) {
+				loaded, loadedOK, plugin = candidate.Plugin, true, candidate.Plugin.Meta.Key
+				break
+			}
+		}
+		if !loadedOK && len(ch.GetSetting().TaskPluginBindings()) > 0 {
+			return 0, "", fmt.Errorf("no bound provider supports this media model and protocol")
+		}
+	}
 	if item.Type == "video" && ch.Type == constant.ChannelTypeOpenAI && mapped == "minimax-h3" && loadedOK && plugin == "sora" {
 		platform := ch.GetOtherSettings().TaskPlatform
 		if platform == "" || platform == "sora" || platform == "1" || platform == "55" {
@@ -178,6 +215,12 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 		if handled {
 			return quota, version, err
 		}
+	}
+	// Existing Doubao meters below remain a compatibility path for older
+	// plugins. Other plugins use their decoder/usage hooks, without a model or
+	// provider allowlist. A plugin can map canonical parameters explicitly.
+	if loadedOK && (plugin != "doubao" || loaded.Engine.HasExport("buildQuoteRequest")) {
+		return quoteDramaPluginMedia(item, ch, mapped, loaded, ratio)
 	}
 	var expression string
 	var configured bool
@@ -202,7 +245,11 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			facts, err := loaded.Engine.Call(ctx, "extractUsage", map[string]any{"model": item.Model, "upstreamModel": mapped, "usagePurpose": "facts", "requestBody": map[string]any{"model": mapped, "seconds": item.Duration, "metadata": map[string]any{"resolution": item.Resolution, "content": content}}})
+			body := map[string]any{"model": mapped, "seconds": item.Duration, "metadata": map[string]any{"resolution": item.Resolution, "content": content}}
+			if item.Audio != nil {
+				body["generate_audio"] = *item.Audio
+			}
+			facts, err := loaded.Engine.Call(ctx, "extractUsage", map[string]any{"model": item.Model, "upstreamModel": mapped, "usagePurpose": "facts", "requestBody": body})
 			usage, ok := facts.(map[string]any)
 			if err != nil || !ok {
 				return 0, "", fmt.Errorf("video provider rejected quote parameters")
@@ -273,6 +320,168 @@ func quoteDramaMediaChannel(item dramaMediaItem, ch *model.Channel, ratio float6
 	}
 	quota, err := common.QuotaFromFloatStrict(math.Round(cost * common.QuotaPerUnit * ratio))
 	return quota, fmt.Sprint(ch.Id, mapped, expression), err
+}
+
+func quoteDramaPluginMedia(item dramaMediaItem, ch *model.Channel, mapped string, plugin *jsplugin.LoadedPlugin, ratio float64) (int, string, error) {
+	expression, configured := billing_setting.ResolveTaskBillingExpr(plugin.Meta.Key, item.Model, mapped)
+	useExpression := configured || billing_setting.GetBillingMode(item.Model) == billing_setting.BillingModeTieredExpr
+	if useExpression && !configured {
+		return 0, "", fmt.Errorf("model billing is not configured for provider %s", plugin.Meta.Key)
+	}
+	if useExpression {
+		if billingexpr.UsesFixedPricing(expression) {
+			return 0, "", fmt.Errorf("fixed pricing is not supported for task usage expressions")
+		}
+		schema, _ := plugin.Meta.UsageForModels(mapped, item.Model)
+		if !billing_setting.TaskExprCompatible(expression, schema) {
+			return 0, "", fmt.Errorf("provider %s does not declare the usage fields required by its price", plugin.Meta.Key)
+		}
+		// Task submission evaluates usage facts only. Request/token-dependent
+		// formulas cannot be faithfully quoted from the canonical parameters.
+		if regexp.MustCompile(`\b(header|param|req)\s*\(`).MatchString(expression) {
+			return 0, "", fmt.Errorf("price depends on request or output usage unavailable to quote")
+		}
+		for key := range billingexpr.UsedVars(expression) {
+			if slices.Contains([]string{"p", "c", "len", "cr", "cc", "cc1h", "img", "img_cr", "img_o", "ai", "ao", "image_count"}, key) {
+				return 0, "", fmt.Errorf("price depends on request or output usage unavailable to quote")
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var intent any
+	var err error
+	if plugin.Engine.HasExport("buildQuoteRequest") {
+		intent, err = plugin.Engine.Call(ctx, "buildQuoteRequest", map[string]any{"model": item.Model, "upstreamModel": mapped, "parameters": item})
+	} else {
+		// Standard host protocol input. Providers with a different wire shape
+		// implement buildQuoteRequest and still reuse their actual extractUsage.
+		count := max(item.Count, 1)
+		body := make(map[string]any, len(item.Options)+6)
+		for key, value := range item.Options {
+			body[key] = value
+		}
+		body["model"], body["prompt"] = item.Model, "quote"
+		metadata := map[string]any{}
+		if provided, ok := body["metadata"].(map[string]any); ok {
+			for key, value := range provided {
+				metadata[key] = value
+			}
+		}
+		if item.Resolution != "" {
+			metadata["resolution"] = item.Resolution
+		}
+		if item.AspectRatio != "" {
+			metadata["aspect_ratio"] = item.AspectRatio
+		}
+		if len(metadata) > 0 {
+			body["metadata"] = metadata
+		}
+		if item.Audio != nil {
+			body["generate_audio"] = *item.Audio
+		}
+		if item.Size != "" {
+			body["size"] = item.Size
+		}
+		protocol := "openai_image"
+		if item.Type == "video" {
+			protocol = "openai_video"
+			body["seconds"] = item.Duration
+			if item.Resolution != "" {
+				body["resolution"] = item.Resolution
+			}
+			if item.AspectRatio != "" {
+				body["ratio"] = item.AspectRatio
+			}
+		} else {
+			body["n"] = count
+			if item.Quality != "" {
+				body["quality"] = item.Quality
+			}
+		}
+		// Placeholder references are never fetched. Reject when a decoder
+		// cannot represent the requested reference kind/count.
+		if item.HasReferenceVideo || (item.ReferenceImageCount != nil && *item.ReferenceImageCount > 0) {
+			return 0, "", fmt.Errorf("provider %s requires buildQuoteRequest for reference media quotes", plugin.Meta.Key)
+		}
+		claimed := false
+		for _, claim := range plugin.Meta.Protocols {
+			if claim.Name == protocol && (len(claim.Models) == 0 || slices.ContainsFunc(claim.Models, func(model string) bool {
+				return strings.EqualFold(model, item.Model) || strings.EqualFold(model, mapped)
+			})) {
+				claimed = true
+				break
+			}
+		}
+		if !claimed {
+			return 0, "", fmt.Errorf("provider %s requires buildQuoteRequest for %s quotes", plugin.Meta.Key, item.Type)
+		}
+		path, operation := "/v1/videos", "create"
+		if item.Type == "image" {
+			path, operation = "/v1/images/generations", "generate"
+		}
+		decodeContext := jsplugin.ProtocolRequestContext{
+			RouteRequestContext: jsplugin.RouteRequestContext{Path: path, Method: http.MethodPost, Body: map[string]any{"kind": "json", "value": body}},
+			Protocol:            protocol, Operation: operation, Model: item.Model, UpstreamModel: mapped,
+		}
+		intent, err = plugin.Engine.CallPath(ctx, "protocols", []string{protocol, "decodeRequest"}, decodeContext.JSValue())
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("provider %s rejected quote parameters: %w", plugin.Meta.Key, err)
+	}
+	resolved, ok := intent.(map[string]any)
+	if !ok {
+		return 0, "", fmt.Errorf("provider %s cannot quote these parameters", plugin.Meta.Key)
+	}
+	if !plugin.Engine.HasExport("buildQuoteRequest") && (resolved["kind"] != "submit" || resolved["model"] != item.Model) {
+		return 0, "", fmt.Errorf("provider %s did not decode a submission for this model", plugin.Meta.Key)
+	}
+	body, ok := resolved["requestBody"].(map[string]any)
+	if !ok {
+		return 0, "", fmt.Errorf("provider %s returned no quote request", plugin.Meta.Key)
+	}
+	action, _ := resolved["action"].(string)
+	purpose := "billing_ratios"
+	if useExpression {
+		purpose = "facts"
+	}
+	facts, ratios, err := taskplugin.New(plugin).ExtractQuoteUsage(ctx, body, item.Model, mapped, action, purpose)
+	if err != nil {
+		return 0, "", err
+	}
+	version := fmt.Sprint(ch.Id, mapped, plugin.Meta.Key, plugin.Meta.Version, expression)
+	if useExpression {
+		for key := range billingexpr.UsedUsageKeys(expression) {
+			if _, exists := facts[key]; !exists {
+				return 0, "", fmt.Errorf("provider %s cannot estimate required usage: %s", plugin.Meta.Key, key)
+			}
+		}
+		cost, _, runErr := billingexpr.RunExprWithRequest(expression, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: facts})
+		if runErr != nil || cost < 0 {
+			return 0, "", fmt.Errorf("cannot evaluate provider price")
+		}
+		quota, quotaErr := billingexpr.QuotaRoundStrict(cost * common.QuotaPerUnit * ratio)
+		return quota, version, quotaErr
+	}
+	price, exists := ratio_setting.GetModelPrice(item.Model, false)
+	if !exists {
+		price, exists = ratio_setting.GetDefaultModelPriceMap()[item.Model]
+		if !exists {
+			return 0, "", fmt.Errorf("model billing is not configured")
+		}
+	}
+	base, err := common.QuotaFromFloatStrict(price * common.QuotaPerUnit * ratio)
+	if err != nil {
+		return 0, "", err
+	}
+	priceData := types.PriceData{}
+	if !common.StringsContains(constant.TaskPricePatches, item.Model) {
+		for key, value := range ratios {
+			priceData.AddOtherRatio(key, value)
+		}
+	}
+	quota, err := common.QuotaFromFloatStrict(priceData.ApplyOtherRatiosToFloat(float64(base)))
+	return quota, fmt.Sprint(version, price), err
 }
 
 func quoteDramaH3Video(item dramaMediaItem, channelID int, mapped, plugin string, ratio float64) (int, string, error) {

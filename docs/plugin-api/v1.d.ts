@@ -85,6 +85,15 @@ export declare function buildBatchQueryRequest(ctx: BatchQueryContext, tasks: re
 export declare function parseTaskResult(ctx: TaskQueryContext, body: unknown, response: HookHTTPResponse): NormalizedTaskResult;
 export declare function parseBatchResult(ctx: BatchQueryContext, body: unknown, response: HookHTTPResponse): readonly (NormalizedTaskResult & {taskId: string; data?: unknown; state?: unknown})[];
 export declare function extractUsage(ctx: DriverContext & {usagePurpose?: "facts" | "billing_ratios"}): Readonly<Record<string, string | number | boolean>> | null;
+/** Optional pure mapper for read-only media quotes. Reuse request normalization;
+ * the host invokes extractUsage and validates its facts exactly as submission. */
+export interface MediaQuoteParameters {
+  model: string; type: "image" | "video"; duration: number; count: number;
+  resolution: string; aspectRatio: string; quality: string; size: string;
+  hasReferenceVideo: boolean; referenceImageCount: number | null;
+  audio?: boolean; options?: Readonly<Record<string, unknown>>;
+}
+export declare function buildQuoteRequest(ctx: {model: string; upstreamModel: string; parameters: Readonly<MediaQuoteParameters>}): {requestBody: Readonly<Record<string, unknown>>; action?: string} | null;
 export declare function extractUsageOnSubmit(ctx: DriverContext, taskData: unknown): Readonly<Record<string, string | number | boolean>> | null;
 export declare function extractUsageOnComplete(task: TaskQueryContext, result: NormalizedTaskResult, data: unknown): Readonly<Record<string, string | number | boolean>> | null;
 export declare function listArtifacts(task: {taskId: string; status: string; action: string; data: unknown; producerVersion: string}): readonly TaskArtifact[];

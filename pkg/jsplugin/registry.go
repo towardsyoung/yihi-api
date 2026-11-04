@@ -360,6 +360,15 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 	if artifactHooks["listArtifacts"] != artifactHooks["buildContentRequest"] {
 		return nil, fmt.Errorf("plugin %s must export listArtifacts and buildContentRequest together", meta.Key)
 	}
+	if engine.HasExport("buildQuoteRequest") {
+		callable, callErr := engine.HasCallablePath(context.Background(), "buildQuoteRequest")
+		if callErr != nil {
+			return nil, callErr
+		}
+		if !callable {
+			return nil, fmt.Errorf("plugin %s export buildQuoteRequest is not a function", meta.Key)
+		}
+	}
 	for _, route := range meta.Routes {
 		for kind, member := range map[string]string{"decode": route.Decode, "render": route.Render} {
 			if member == "" {
