@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -21,6 +22,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +32,8 @@ import (
 
 func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 	previousDB, previousRegistry, previousCache := model.DB, jsplugin.DefaultRegistry, common.MemoryCacheEnabled
+	previousAddress, previousPublicAddress, previousSecret := system_setting.ServerAddress, system_setting.TaskPublicAddress, common.CryptoSecret
+	system_setting.ServerAddress, system_setting.TaskPublicAddress, common.CryptoSecret = "https://gateway.example", "", "legacy-video-test-secret"
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
@@ -38,6 +42,7 @@ func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.Task{}))
 	model.DB, jsplugin.DefaultRegistry, common.MemoryCacheEnabled = db, jsplugin.NewRegistry(), true
 	t.Cleanup(func() {
+		system_setting.ServerAddress, system_setting.TaskPublicAddress, common.CryptoSecret = previousAddress, previousPublicAddress, previousSecret
 		model.DB, jsplugin.DefaultRegistry, common.MemoryCacheEnabled = previousDB, previousRegistry, previousCache
 		if previousDB != nil {
 			model.InitChannelCache()
@@ -146,7 +151,7 @@ func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 	allowed, _ := model.ChannelSatisfiesFilters(selected, "minimax-h3", service.GetChannelConstraints(ordinary).Filters)
 	assert.False(t, allowed, "ordinary traffic must not select a video-only plugin")
 
-	task := &model.Task{TaskID: "task_legacy_yunqiao", UserId: 2, Platform: "yunqiao", ChannelId: 37, Status: model.TaskStatusSuccess, Properties: model.Properties{OriginModelName: "minimax-h3"}, PrivateData: model.TaskPrivateData{UpstreamTaskID: "private-id", ResultURL: "https://example.com/video.mp4"}}
+	task := &model.Task{TaskID: "task_legacy_yunqiao", UserId: 2, Platform: "yunqiao", ChannelId: 37, Status: model.TaskStatusSuccess, Properties: model.Properties{OriginModelName: "minimax-h3"}, PrivateData: model.TaskPrivateData{UpstreamTaskID: "private-id", ResultURL: "https://provider.example/v1/videos/private-id/content", Execution: &model.TaskExecutionSnapshot{TaskPlugin: &model.TaskPluginSnapshot{Key: "yunqiao"}}}}
 	require.NoError(t, db.Create(task).Error)
 	recorder := httptest.NewRecorder()
 	query, _ := gin.CreateTestContext(recorder)
@@ -159,8 +164,17 @@ func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 	assert.Equal(t, "success", response["code"])
 	data := response["data"].(map[string]any)
 	assert.Equal(t, "SUCCESS", data["status"])
-	assert.Equal(t, "https://example.com/video.mp4", data["result_url"])
+	contentURL, err := url.Parse(data["result_url"].(string))
+	require.NoError(t, err)
+	assert.Equal(t, "gateway.example", contentURL.Host)
+	assert.Equal(t, "/v1/tasks/task_legacy_yunqiao/artifacts/video/content", contentURL.Path)
+	assert.True(t, service.VerifyTaskArtifactAccess(contentURL.Query().Get("access"), task.TaskID, "video"))
+	assert.False(t, service.VerifyTaskArtifactAccess(contentURL.Query().Get("access"), "another-task", "video"))
 	assert.NotContains(t, data, "private_data")
+	query.Set("id", 3)
+	taskErr := relay.RelayTaskFetch(query, relayconstant.RelayModeVideoFetchByID)
+	require.NotNil(t, taskErr)
+	assert.Equal(t, "task_not_exist", taskErr.Code)
 }
 
 func TestYunqiaoResponsesProtocol(t *testing.T) {

@@ -570,9 +570,28 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	}
 
 	// 通用 TaskDto 格式
+	taskView := TaskModel2Dto(originTask)
+	if originTask.Status == model.TaskStatusSuccess && originTask.PrivateData.Execution != nil && originTask.PrivateData.Execution.TaskPlugin != nil {
+		if provider, ok := GetTaskAdaptor(originTask.Platform).(channel.TaskArtifactProvider); ok {
+			artifacts, err := provider.ListArtifacts(originTask)
+			if err != nil {
+				return nil, service.TaskErrorWrapper(err, "artifact_plugin_error", http.StatusInternalServerError)
+			}
+			for _, artifact := range artifacts {
+				if artifact.Type != "video" {
+					continue
+				}
+				taskView.ResultURL, err = service.BuildTaskArtifactContentURL(originTask.TaskID, artifact.Key)
+				if err != nil {
+					return nil, service.TaskErrorWrapper(err, "artifact_url_error", http.StatusInternalServerError)
+				}
+				break
+			}
+		}
+	}
 	respBody, err = common.Marshal(dto.TaskResponse[any]{
 		Code: "success",
-		Data: TaskModel2Dto(originTask),
+		Data: taskView,
 	})
 	if err != nil {
 		taskResp = service.TaskErrorWrapper(err, "marshal_response_failed", http.StatusInternalServerError)
