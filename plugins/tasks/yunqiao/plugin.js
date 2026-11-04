@@ -7,7 +7,7 @@ export const meta = {
     en: "Yunqiao asynchronous text-to-video and image-to-video generation",
     zh: "云桥异步文生视频和图生视频",
   },
-  version: "1.1.1",
+  version: "1.1.2",
   author: { name: "QuantumNous" },
   website: "https://nextrun.top/docs#videos",
   baseUrl: "https://asiasouth.up.railway.app",
@@ -129,6 +129,8 @@ export function buildSubmitRequest(ctx) {
   const req = normalizeRequest(ctx.requestBody, ctx.upstreamModel || ctx.model);
   // Match the shared host model spelling while using Yunqiao's published wire name.
   if (req.model === "MiniMax-H3") req.model = "minimax-h3";
+  // Yunqiao's JSON API requires a string; normalized usage stays numeric.
+  req.seconds = String(req.seconds);
   const headers = { Authorization: "Bearer " + ctx.apiKey };
   if ((ctx.files || []).length) {
     const parts = [];

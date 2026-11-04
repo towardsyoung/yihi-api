@@ -89,7 +89,7 @@ func TestYunqiaoLegacyVideoEntry(t *testing.T) {
 	var outbound map[string]any
 	require.NoError(t, common.DecodeJson(reader, &outbound))
 	assert.Equal(t, map[string]any{
-		"model": "minimax-h3", "prompt": "animate the reference", "seconds": float64(5), "input_reference": "https://example.com/reference.png",
+		"model": "minimax-h3", "prompt": "animate the reference", "seconds": "5", "input_reference": "https://example.com/reference.png",
 		"resolution": "768p", "ratio": "16:9", "generate_audio": false,
 		"metadata": map[string]any{"resolution": "768p", "aspect_ratio": "16:9", "generate_audio": false, "audios": []any{}},
 	}, outbound)
@@ -192,6 +192,31 @@ func TestYunqiaoVideoContract(t *testing.T) {
 	require.NoError(t, err)
 	plugin, err := jsplugin.NewRegistry().RegisterFactory(source, jsplugin.Options{Key: "yunqiao"})
 	require.NoError(t, err)
+	t.Run("JSON duration satisfies the upstream string contract", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body map[string]any
+			want string
+		}{
+			{name: "numeric seconds", body: map[string]any{"seconds": 4}, want: "4"},
+			{name: "string seconds", body: map[string]any{"seconds": "4"}, want: "4"},
+			{name: "legacy duration", body: map[string]any{"duration": 4}, want: "4"},
+			{name: "default duration", body: map[string]any{}, want: "5"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tc.body["prompt"] = "waves"
+				value, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", map[string]any{"model": "minimax-h3-lite", "upstreamModel": "minimax-h3-lite", "baseUrl": "https://provider.example", "apiKey": "test-key", "requestBody": tc.body})
+				require.NoError(t, err)
+				encoded, err := common.Marshal(value.(map[string]any)["body"])
+				require.NoError(t, err)
+				var upstream struct {
+					Seconds string `json:"seconds"`
+				}
+				require.NoError(t, common.Unmarshal(encoded, &upstream))
+				assert.Equal(t, tc.want, upstream.Seconds)
+			})
+		}
+	})
 	decode := func(t *testing.T, body map[string]any) (map[string]any, error) {
 		t.Helper()
 		value, callErr := plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_video", "decodeRequest"}, map[string]any{"model": "my-video", "body": body})
